@@ -38,6 +38,7 @@ func CloneRepo(ctx context.Context, repoURL, branch, gitToken string) (cloneDir 
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = os.TempDir()
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		os.RemoveAll(cloneDir)

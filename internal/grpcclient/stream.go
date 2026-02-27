@@ -86,13 +86,27 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 		case *clankv1.ControlMessage_Deploy:
 			log.Printf("Received deploy command for deployment %s", p.Deploy.GetDeploymentId())
 			if handlers.OnDeploy != nil {
-				go handlers.OnDeploy(ctx, stream, p.Deploy)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in deploy handler: %v", r)
+						}
+					}()
+					handlers.OnDeploy(ctx, stream, p.Deploy)
+				}()
 			}
 
 		case *clankv1.ControlMessage_ContainerCmd:
 			log.Printf("Received container command %s: %s", p.ContainerCmd.GetCommandId(), p.ContainerCmd.GetAction())
 			if handlers.OnContainerCommand != nil {
-				go handlers.OnContainerCommand(ctx, stream, p.ContainerCmd)
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in container command handler: %v", r)
+						}
+					}()
+					handlers.OnContainerCommand(ctx, stream, p.ContainerCmd)
+				}()
 			}
 
 		default:
