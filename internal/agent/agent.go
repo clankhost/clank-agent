@@ -11,7 +11,10 @@ import (
 	"github.com/anaremore/clank/apps/agent/internal/deploy"
 	"github.com/anaremore/clank/apps/agent/internal/docker"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
+	"github.com/anaremore/clank/apps/agent/internal/logs"
+	"github.com/anaremore/clank/apps/agent/internal/metrics"
 	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
+	"google.golang.org/grpc"
 )
 
 const (
@@ -19,6 +22,8 @@ const (
 	reconnectBaseWait = 2 * time.Second
 	reconnectMaxWait  = 60 * time.Second
 )
+
+const streamReconnectWait = 5 * time.Second
 
 // Agent manages the lifecycle of the gRPC connection and heartbeat loop.
 type Agent struct {
@@ -29,6 +34,8 @@ type Agent struct {
 	builder      *build.Builder
 	deployer     *deploy.Deployer
 	handler      *CommandHandler
+	logCollector *logs.Collector
+	metCollector *metrics.Collector
 }
 
 // New creates a new Agent from the given config.
@@ -47,6 +54,8 @@ func New(cfg *Config, agentVersion string) (*Agent, error) {
 	b := build.NewBuilder(dockerMgr)
 	d := deploy.NewDeployer(dockerMgr)
 	h := NewCommandHandler(dockerMgr, b, d)
+	lc := logs.NewCollector(dockerMgr)
+	mc := metrics.NewCollector(dockerMgr, cfg.ServerID)
 
 	return &Agent{
 		cfg:          cfg,
@@ -56,6 +65,8 @@ func New(cfg *Config, agentVersion string) (*Agent, error) {
 		builder:      b,
 		deployer:     d,
 		handler:      h,
+		logCollector: lc,
+		metCollector: mc,
 	}, nil
 }
 
@@ -67,6 +78,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.dockerMgr.EnsureTraefik(ctx); err != nil {
 		log.Printf("Warning: could not ensure Traefik is running: %v", err)
 	}
+
+	// Start log and metrics collectors (survive reconnections)
+	go a.logCollector.Run(ctx)
+	go a.metCollector.Run(ctx)
 
 	wait := reconnectBaseWait
 
@@ -116,12 +131,12 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	log.Println("Connected to control plane")
 
 	// Start heartbeat sender in a goroutine
-	heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
-	defer heartbeatCancel()
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- a.sendHeartbeats(heartbeatCtx, stream)
+		errCh <- a.sendHeartbeats(streamCtx, stream)
 	}()
 
 	// Receive loop — listen for commands from control plane
@@ -133,12 +148,50 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)
 	}()
 
+	// Start log and metrics streamers (per-connection, cancelled on disconnect)
+	go a.runLogStreamer(streamCtx, conn)
+	go a.runMetricStreamer(streamCtx, conn)
+
 	// Wait for either goroutine to finish or context cancellation
 	select {
 	case <-ctx.Done():
 		return nil
 	case err := <-errCh:
 		return err
+	}
+}
+
+// runLogStreamer sends log entries to the control plane, reconnecting the
+// stream on failure. The underlying log collector channel survives reconnects.
+func (a *Agent) runLogStreamer(ctx context.Context, conn *grpc.ClientConn) {
+	for {
+		err := grpcclient.StreamLogs(ctx, conn, a.logCollector.Entries())
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("[logs] Stream disconnected: %v, reconnecting in %s...", err, streamReconnectWait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(streamReconnectWait):
+		}
+	}
+}
+
+// runMetricStreamer sends metric batches to the control plane, reconnecting
+// the stream on failure.
+func (a *Agent) runMetricStreamer(ctx context.Context, conn *grpc.ClientConn) {
+	for {
+		err := grpcclient.StreamMetrics(ctx, conn, a.metCollector.Batches())
+		if ctx.Err() != nil {
+			return
+		}
+		log.Printf("[metrics] Stream disconnected: %v, reconnecting in %s...", err, streamReconnectWait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(streamReconnectWait):
+		}
 	}
 }
 

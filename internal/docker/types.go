@@ -18,4 +18,5 @@ type ContainerInfo struct {
 	Name        string
 	State       string
 	Image       string
+	Labels      map[string]string
 }

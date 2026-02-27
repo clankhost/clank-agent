@@ -83,7 +83,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	// Generate Traefik labels
-	labels := generateTraefikLabels(opts.ServiceSlug, opts.Domains, opts.Port)
+	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, opts.Port)
 
 	// Container name
 	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
@@ -174,7 +174,7 @@ func checkHTTPHealth(url string, timeoutSec int) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
-func generateTraefikLabels(serviceSlug string, domains []string, port int) map[string]string {
+func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int) map[string]string {
 	routerName := "clank-" + serviceSlug
 
 	// Filter domains through sanitizer
@@ -202,8 +202,9 @@ func generateTraefikLabels(serviceSlug string, domains []string, port int) map[s
 		fmt.Sprintf("traefik.http.routers.%s.rule", routerName):                         hostRules,
 		fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerName):                  "web",
 		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", routerName):     fmt.Sprintf("%d", port),
-		"clank.managed":      "true",
-		"clank.service_slug": serviceSlug,
+		"clank.managed":       "true",
+		"clank.service_slug":  serviceSlug,
+		"clank.deployment_id": deploymentID,
 	}
 
 	return labels

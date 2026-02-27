@@ -265,6 +265,7 @@ func (m *Manager) ListManagedContainers(ctx context.Context) ([]ContainerInfo, e
 			Name:        name,
 			State:       c.State,
 			Image:       c.Image,
+			Labels:      c.Labels,
 		})
 	}
 	return result, nil
@@ -296,6 +297,25 @@ func (m *Manager) GetContainerIP(ctx context.Context, containerID, networkName s
 	}
 
 	return "", fmt.Errorf("no IP address found for container %s", containerID)
+}
+
+// ContainerLogs returns a multiplexed ReadCloser for streaming container logs.
+// If follow is true, the stream blocks for new output. The tail parameter
+// controls how many existing lines to return ("0" for none, "all" for all).
+func (m *Manager) ContainerLogs(ctx context.Context, containerID string, follow bool, tail string) (io.ReadCloser, error) {
+	return m.cli.ContainerLogs(ctx, containerID, container.LogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Follow:     follow,
+		Tail:       tail,
+		Timestamps: true,
+	})
+}
+
+// ContainerStatsOneShot returns a single stats snapshot for a container.
+// The caller must close the Body on the returned StatsResponseReader.
+func (m *Manager) ContainerStatsOneShot(ctx context.Context, containerID string) (container.StatsResponseReader, error) {
+	return m.cli.ContainerStatsOneShot(ctx, containerID)
 }
 
 func int64Ptr(v int64) *int64 {
