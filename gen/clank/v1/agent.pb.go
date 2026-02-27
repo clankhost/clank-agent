@@ -21,6 +21,55 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type ContainerCommand_Action int32
+
+const (
+	ContainerCommand_STOP    ContainerCommand_Action = 0
+	ContainerCommand_START   ContainerCommand_Action = 1
+	ContainerCommand_RESTART ContainerCommand_Action = 2
+)
+
+// Enum value maps for ContainerCommand_Action.
+var (
+	ContainerCommand_Action_name = map[int32]string{
+		0: "STOP",
+		1: "START",
+		2: "RESTART",
+	}
+	ContainerCommand_Action_value = map[string]int32{
+		"STOP":    0,
+		"START":   1,
+		"RESTART": 2,
+	}
+)
+
+func (x ContainerCommand_Action) Enum() *ContainerCommand_Action {
+	p := new(ContainerCommand_Action)
+	*p = x
+	return p
+}
+
+func (x ContainerCommand_Action) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ContainerCommand_Action) Descriptor() protoreflect.EnumDescriptor {
+	return file_clank_v1_agent_proto_enumTypes[0].Descriptor()
+}
+
+func (ContainerCommand_Action) Type() protoreflect.EnumType {
+	return &file_clank_v1_agent_proto_enumTypes[0]
+}
+
+func (x ContainerCommand_Action) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ContainerCommand_Action.Descriptor instead.
+func (ContainerCommand_Action) EnumDescriptor() ([]byte, []int) {
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{12, 0}
+}
+
 type EnrollRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// One-time enrollment token (shown once at server creation).
@@ -467,12 +516,21 @@ func (x *ContainerStatus) GetImage() string {
 	return ""
 }
 
-// Phase 2: progress updates from agent during deployments.
+// Progress updates from agent during deployments.
 type DeployProgress struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DeploymentId  string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
-	Status        string                 `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
-	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	// Maps to BuildStatus/DeploymentStatus: cloning, building, built,
+	// build_failed, deploying, health_checking, active, failed
+	Status  string `protobuf:"bytes,2,opt,name=status,proto3" json:"status,omitempty"`
+	Message string `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	// Set when container is created
+	ContainerId   string `protobuf:"bytes,4,opt,name=container_id,json=containerId,proto3" json:"container_id,omitempty"`
+	ContainerName string `protobuf:"bytes,5,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
+	// Set when build completes
+	ImageTag string `protobuf:"bytes,6,opt,name=image_tag,json=imageTag,proto3" json:"image_tag,omitempty"`
+	// Set after clone
+	GitSha        string `protobuf:"bytes,7,opt,name=git_sha,json=gitSha,proto3" json:"git_sha,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -528,7 +586,35 @@ func (x *DeployProgress) GetMessage() string {
 	return ""
 }
 
-// Phase 2: result of a command sent to the agent.
+func (x *DeployProgress) GetContainerId() string {
+	if x != nil {
+		return x.ContainerId
+	}
+	return ""
+}
+
+func (x *DeployProgress) GetContainerName() string {
+	if x != nil {
+		return x.ContainerName
+	}
+	return ""
+}
+
+func (x *DeployProgress) GetImageTag() string {
+	if x != nil {
+		return x.ImageTag
+	}
+	return ""
+}
+
+func (x *DeployProgress) GetGitSha() string {
+	if x != nil {
+		return x.GitSha
+	}
+	return ""
+}
+
+// Result of a command sent to the agent (e.g., container stop/restart).
 type CommandResult struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	CommandId     string                 `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
@@ -597,6 +683,7 @@ type ControlMessage struct {
 	//	*ControlMessage_Secret
 	//	*ControlMessage_CertRotation
 	//	*ControlMessage_Ping
+	//	*ControlMessage_ContainerCmd
 	Payload       isControlMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -675,6 +762,15 @@ func (x *ControlMessage) GetPing() *Ping {
 	return nil
 }
 
+func (x *ControlMessage) GetContainerCmd() *ContainerCommand {
+	if x != nil {
+		if x, ok := x.Payload.(*ControlMessage_ContainerCmd); ok {
+			return x.ContainerCmd
+		}
+	}
+	return nil
+}
+
 type isControlMessage_Payload interface {
 	isControlMessage_Payload()
 }
@@ -695,6 +791,10 @@ type ControlMessage_Ping struct {
 	Ping *Ping `protobuf:"bytes,4,opt,name=ping,proto3,oneof"`
 }
 
+type ControlMessage_ContainerCmd struct {
+	ContainerCmd *ContainerCommand `protobuf:"bytes,5,opt,name=container_cmd,json=containerCmd,proto3,oneof"`
+}
+
 func (*ControlMessage_Deploy) isControlMessage_Payload() {}
 
 func (*ControlMessage_Secret) isControlMessage_Payload() {}
@@ -703,18 +803,41 @@ func (*ControlMessage_CertRotation) isControlMessage_Payload() {}
 
 func (*ControlMessage_Ping) isControlMessage_Payload() {}
 
-// Phase 2: instructs the agent to deploy a service.
+func (*ControlMessage_ContainerCmd) isControlMessage_Payload() {}
+
+// Instructs the agent to deploy a service.
+// If repo_url is set, the agent clones + builds. If only image_tag is set,
+// the agent pulls the image directly (skip build).
 type DeployCommand struct {
-	state           protoimpl.MessageState `protogen:"open.v1"`
-	DeploymentId    string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
-	ServiceSlug     string                 `protobuf:"bytes,2,opt,name=service_slug,json=serviceSlug,proto3" json:"service_slug,omitempty"`
-	ImageTag        string                 `protobuf:"bytes,3,opt,name=image_tag,json=imageTag,proto3" json:"image_tag,omitempty"`
-	EnvVars         map[string]string      `protobuf:"bytes,4,rep,name=env_vars,json=envVars,proto3" json:"env_vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Port            int32                  `protobuf:"varint,5,opt,name=port,proto3" json:"port,omitempty"`
-	HealthCheckPath string                 `protobuf:"bytes,6,opt,name=health_check_path,json=healthCheckPath,proto3" json:"health_check_path,omitempty"`
-	ComposeOverride string                 `protobuf:"bytes,7,opt,name=compose_override,json=composeOverride,proto3" json:"compose_override,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	DeploymentId string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	ServiceSlug  string                 `protobuf:"bytes,2,opt,name=service_slug,json=serviceSlug,proto3" json:"service_slug,omitempty"`
+	// Pre-built image to pull (skip build if repo_url is empty).
+	ImageTag string `protobuf:"bytes,3,opt,name=image_tag,json=imageTag,proto3" json:"image_tag,omitempty"`
+	// Environment variables for the container.
+	EnvVars map[string]string `protobuf:"bytes,4,rep,name=env_vars,json=envVars,proto3" json:"env_vars,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Container port to expose.
+	Port int32 `protobuf:"varint,5,opt,name=port,proto3" json:"port,omitempty"`
+	// Health check path (empty = skip health checks).
+	HealthCheckPath string `protobuf:"bytes,6,opt,name=health_check_path,json=healthCheckPath,proto3" json:"health_check_path,omitempty"`
+	// Reserved for future compose override support.
+	ComposeOverride string `protobuf:"bytes,7,opt,name=compose_override,json=composeOverride,proto3" json:"compose_override,omitempty"`
+	// Git repo URL for clone-and-build deploys.
+	RepoUrl string `protobuf:"bytes,8,opt,name=repo_url,json=repoUrl,proto3" json:"repo_url,omitempty"`
+	// Git branch to clone (default: main).
+	Branch string `protobuf:"bytes,9,opt,name=branch,proto3" json:"branch,omitempty"`
+	// Path to Dockerfile relative to repo root (empty = auto-detect).
+	DockerfilePath string `protobuf:"bytes,10,opt,name=dockerfile_path,json=dockerfilePath,proto3" json:"dockerfile_path,omitempty"`
+	// PAT for cloning private repos (ephemeral, not stored by agent).
+	GitToken string `protobuf:"bytes,11,opt,name=git_token,json=gitToken,proto3" json:"git_token,omitempty"`
+	// Health check configuration.
+	HealthConfig *HealthCheckConfig `protobuf:"bytes,12,opt,name=health_config,json=healthConfig,proto3" json:"health_config,omitempty"`
+	// Domains for Traefik routing.
+	Domains []string `protobuf:"bytes,13,rep,name=domains,proto3" json:"domains,omitempty"`
+	// Resource limits for the container.
+	ResourceConfig *ResourceConfig `protobuf:"bytes,14,opt,name=resource_config,json=resourceConfig,proto3" json:"resource_config,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *DeployCommand) Reset() {
@@ -796,7 +919,257 @@ func (x *DeployCommand) GetComposeOverride() string {
 	return ""
 }
 
-// Phase 2: delivers secrets to the agent for a deployment.
+func (x *DeployCommand) GetRepoUrl() string {
+	if x != nil {
+		return x.RepoUrl
+	}
+	return ""
+}
+
+func (x *DeployCommand) GetBranch() string {
+	if x != nil {
+		return x.Branch
+	}
+	return ""
+}
+
+func (x *DeployCommand) GetDockerfilePath() string {
+	if x != nil {
+		return x.DockerfilePath
+	}
+	return ""
+}
+
+func (x *DeployCommand) GetGitToken() string {
+	if x != nil {
+		return x.GitToken
+	}
+	return ""
+}
+
+func (x *DeployCommand) GetHealthConfig() *HealthCheckConfig {
+	if x != nil {
+		return x.HealthConfig
+	}
+	return nil
+}
+
+func (x *DeployCommand) GetDomains() []string {
+	if x != nil {
+		return x.Domains
+	}
+	return nil
+}
+
+func (x *DeployCommand) GetResourceConfig() *ResourceConfig {
+	if x != nil {
+		return x.ResourceConfig
+	}
+	return nil
+}
+
+// Health check configuration for deployed containers.
+type HealthCheckConfig struct {
+	state               protoimpl.MessageState `protogen:"open.v1"`
+	Path                string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	TimeoutSeconds      int32                  `protobuf:"varint,2,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"`
+	Retries             int32                  `protobuf:"varint,3,opt,name=retries,proto3" json:"retries,omitempty"`
+	IntervalSeconds     int32                  `protobuf:"varint,4,opt,name=interval_seconds,json=intervalSeconds,proto3" json:"interval_seconds,omitempty"`
+	StartupGraceSeconds int32                  `protobuf:"varint,5,opt,name=startup_grace_seconds,json=startupGraceSeconds,proto3" json:"startup_grace_seconds,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
+func (x *HealthCheckConfig) Reset() {
+	*x = HealthCheckConfig{}
+	mi := &file_clank_v1_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HealthCheckConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HealthCheckConfig) ProtoMessage() {}
+
+func (x *HealthCheckConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_clank_v1_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HealthCheckConfig.ProtoReflect.Descriptor instead.
+func (*HealthCheckConfig) Descriptor() ([]byte, []int) {
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *HealthCheckConfig) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+func (x *HealthCheckConfig) GetTimeoutSeconds() int32 {
+	if x != nil {
+		return x.TimeoutSeconds
+	}
+	return 0
+}
+
+func (x *HealthCheckConfig) GetRetries() int32 {
+	if x != nil {
+		return x.Retries
+	}
+	return 0
+}
+
+func (x *HealthCheckConfig) GetIntervalSeconds() int32 {
+	if x != nil {
+		return x.IntervalSeconds
+	}
+	return 0
+}
+
+func (x *HealthCheckConfig) GetStartupGraceSeconds() int32 {
+	if x != nil {
+		return x.StartupGraceSeconds
+	}
+	return 0
+}
+
+// Resource limits for a container.
+type ResourceConfig struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// CPU limit in cores (e.g., 0.5 = half a core).
+	CpuLimit float64 `protobuf:"fixed64,1,opt,name=cpu_limit,json=cpuLimit,proto3" json:"cpu_limit,omitempty"`
+	// Memory limit in megabytes.
+	MemoryLimitMb int32 `protobuf:"varint,2,opt,name=memory_limit_mb,json=memoryLimitMb,proto3" json:"memory_limit_mb,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ResourceConfig) Reset() {
+	*x = ResourceConfig{}
+	mi := &file_clank_v1_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ResourceConfig) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ResourceConfig) ProtoMessage() {}
+
+func (x *ResourceConfig) ProtoReflect() protoreflect.Message {
+	mi := &file_clank_v1_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ResourceConfig.ProtoReflect.Descriptor instead.
+func (*ResourceConfig) Descriptor() ([]byte, []int) {
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *ResourceConfig) GetCpuLimit() float64 {
+	if x != nil {
+		return x.CpuLimit
+	}
+	return 0
+}
+
+func (x *ResourceConfig) GetMemoryLimitMb() int32 {
+	if x != nil {
+		return x.MemoryLimitMb
+	}
+	return 0
+}
+
+// Container lifecycle commands (stop, start, restart).
+type ContainerCommand struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	CommandId     string                  `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	DeploymentId  string                  `protobuf:"bytes,2,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
+	ContainerName string                  `protobuf:"bytes,3,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
+	Action        ContainerCommand_Action `protobuf:"varint,4,opt,name=action,proto3,enum=clank.v1.ContainerCommand_Action" json:"action,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ContainerCommand) Reset() {
+	*x = ContainerCommand{}
+	mi := &file_clank_v1_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ContainerCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ContainerCommand) ProtoMessage() {}
+
+func (x *ContainerCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_clank_v1_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ContainerCommand.ProtoReflect.Descriptor instead.
+func (*ContainerCommand) Descriptor() ([]byte, []int) {
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *ContainerCommand) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *ContainerCommand) GetDeploymentId() string {
+	if x != nil {
+		return x.DeploymentId
+	}
+	return ""
+}
+
+func (x *ContainerCommand) GetContainerName() string {
+	if x != nil {
+		return x.ContainerName
+	}
+	return ""
+}
+
+func (x *ContainerCommand) GetAction() ContainerCommand_Action {
+	if x != nil {
+		return x.Action
+	}
+	return ContainerCommand_STOP
+}
+
+// Delivers secrets to the agent for a deployment.
 type SecretDelivery struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DeploymentId  string                 `protobuf:"bytes,1,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
@@ -807,7 +1180,7 @@ type SecretDelivery struct {
 
 func (x *SecretDelivery) Reset() {
 	*x = SecretDelivery{}
-	mi := &file_clank_v1_agent_proto_msgTypes[10]
+	mi := &file_clank_v1_agent_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -819,7 +1192,7 @@ func (x *SecretDelivery) String() string {
 func (*SecretDelivery) ProtoMessage() {}
 
 func (x *SecretDelivery) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[10]
+	mi := &file_clank_v1_agent_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -832,7 +1205,7 @@ func (x *SecretDelivery) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecretDelivery.ProtoReflect.Descriptor instead.
 func (*SecretDelivery) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{10}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SecretDelivery) GetDeploymentId() string {
@@ -860,7 +1233,7 @@ type CertRotation struct {
 
 func (x *CertRotation) Reset() {
 	*x = CertRotation{}
-	mi := &file_clank_v1_agent_proto_msgTypes[11]
+	mi := &file_clank_v1_agent_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -872,7 +1245,7 @@ func (x *CertRotation) String() string {
 func (*CertRotation) ProtoMessage() {}
 
 func (x *CertRotation) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[11]
+	mi := &file_clank_v1_agent_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -885,7 +1258,7 @@ func (x *CertRotation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CertRotation.ProtoReflect.Descriptor instead.
 func (*CertRotation) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{11}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *CertRotation) GetNewCert() []byte {
@@ -911,7 +1284,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_clank_v1_agent_proto_msgTypes[12]
+	mi := &file_clank_v1_agent_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -923,7 +1296,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[12]
+	mi := &file_clank_v1_agent_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -936,7 +1309,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{12}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{15}
 }
 
 type LogEntry struct {
@@ -952,7 +1325,7 @@ type LogEntry struct {
 
 func (x *LogEntry) Reset() {
 	*x = LogEntry{}
-	mi := &file_clank_v1_agent_proto_msgTypes[13]
+	mi := &file_clank_v1_agent_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -964,7 +1337,7 @@ func (x *LogEntry) String() string {
 func (*LogEntry) ProtoMessage() {}
 
 func (x *LogEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[13]
+	mi := &file_clank_v1_agent_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -977,7 +1350,7 @@ func (x *LogEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogEntry.ProtoReflect.Descriptor instead.
 func (*LogEntry) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{13}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *LogEntry) GetDeploymentId() string {
@@ -1023,7 +1396,7 @@ type LogAck struct {
 
 func (x *LogAck) Reset() {
 	*x = LogAck{}
-	mi := &file_clank_v1_agent_proto_msgTypes[14]
+	mi := &file_clank_v1_agent_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1035,7 +1408,7 @@ func (x *LogAck) String() string {
 func (*LogAck) ProtoMessage() {}
 
 func (x *LogAck) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[14]
+	mi := &file_clank_v1_agent_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1048,7 +1421,7 @@ func (x *LogAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LogAck.ProtoReflect.Descriptor instead.
 func (*LogAck) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{14}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{17}
 }
 
 type MetricBatch struct {
@@ -1060,7 +1433,7 @@ type MetricBatch struct {
 
 func (x *MetricBatch) Reset() {
 	*x = MetricBatch{}
-	mi := &file_clank_v1_agent_proto_msgTypes[15]
+	mi := &file_clank_v1_agent_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1072,7 +1445,7 @@ func (x *MetricBatch) String() string {
 func (*MetricBatch) ProtoMessage() {}
 
 func (x *MetricBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[15]
+	mi := &file_clank_v1_agent_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1085,7 +1458,7 @@ func (x *MetricBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricBatch.ProtoReflect.Descriptor instead.
 func (*MetricBatch) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{15}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *MetricBatch) GetMetrics() []*Metric {
@@ -1107,7 +1480,7 @@ type Metric struct {
 
 func (x *Metric) Reset() {
 	*x = Metric{}
-	mi := &file_clank_v1_agent_proto_msgTypes[16]
+	mi := &file_clank_v1_agent_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1119,7 +1492,7 @@ func (x *Metric) String() string {
 func (*Metric) ProtoMessage() {}
 
 func (x *Metric) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[16]
+	mi := &file_clank_v1_agent_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1132,7 +1505,7 @@ func (x *Metric) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Metric.ProtoReflect.Descriptor instead.
 func (*Metric) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{16}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *Metric) GetName() string {
@@ -1171,7 +1544,7 @@ type MetricAck struct {
 
 func (x *MetricAck) Reset() {
 	*x = MetricAck{}
-	mi := &file_clank_v1_agent_proto_msgTypes[17]
+	mi := &file_clank_v1_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1183,7 +1556,7 @@ func (x *MetricAck) String() string {
 func (*MetricAck) ProtoMessage() {}
 
 func (x *MetricAck) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[17]
+	mi := &file_clank_v1_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1196,7 +1569,7 @@ func (x *MetricAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MetricAck.ProtoReflect.Descriptor instead.
 func (*MetricAck) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{17}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{20}
 }
 
 var File_clank_v1_agent_proto protoreflect.FileDescriptor
@@ -1240,22 +1613,27 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\fcontainer_id\x18\x01 \x01(\tR\vcontainerId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x14\n" +
-	"\x05image\x18\x04 \x01(\tR\x05image\"g\n" +
+	"\x05image\x18\x04 \x01(\tR\x05image\"\xe7\x01\n" +
 	"\x0eDeployProgress\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
-	"\amessage\x18\x03 \x01(\tR\amessage\"`\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\x12!\n" +
+	"\fcontainer_id\x18\x04 \x01(\tR\vcontainerId\x12%\n" +
+	"\x0econtainer_name\x18\x05 \x01(\tR\rcontainerName\x12\x1b\n" +
+	"\timage_tag\x18\x06 \x01(\tR\bimageTag\x12\x17\n" +
+	"\agit_sha\x18\a \x01(\tR\x06gitSha\"`\n" +
 	"\rCommandResult\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x16\n" +
-	"\x06output\x18\x03 \x01(\tR\x06output\"\xe7\x01\n" +
+	"\x06output\x18\x03 \x01(\tR\x06output\"\xaa\x02\n" +
 	"\x0eControlMessage\x121\n" +
 	"\x06deploy\x18\x01 \x01(\v2\x17.clank.v1.DeployCommandH\x00R\x06deploy\x122\n" +
 	"\x06secret\x18\x02 \x01(\v2\x18.clank.v1.SecretDeliveryH\x00R\x06secret\x12=\n" +
 	"\rcert_rotation\x18\x03 \x01(\v2\x16.clank.v1.CertRotationH\x00R\fcertRotation\x12$\n" +
-	"\x04ping\x18\x04 \x01(\v2\x0e.clank.v1.PingH\x00R\x04pingB\t\n" +
-	"\apayload\"\xdc\x02\n" +
+	"\x04ping\x18\x04 \x01(\v2\x0e.clank.v1.PingH\x00R\x04ping\x12A\n" +
+	"\rcontainer_cmd\x18\x05 \x01(\v2\x1a.clank.v1.ContainerCommandH\x00R\fcontainerCmdB\t\n" +
+	"\apayload\"\xf4\x04\n" +
 	"\rDeployCommand\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12!\n" +
 	"\fservice_slug\x18\x02 \x01(\tR\vserviceSlug\x12\x1b\n" +
@@ -1263,10 +1641,37 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\benv_vars\x18\x04 \x03(\v2$.clank.v1.DeployCommand.EnvVarsEntryR\aenvVars\x12\x12\n" +
 	"\x04port\x18\x05 \x01(\x05R\x04port\x12*\n" +
 	"\x11health_check_path\x18\x06 \x01(\tR\x0fhealthCheckPath\x12)\n" +
-	"\x10compose_override\x18\a \x01(\tR\x0fcomposeOverride\x1a:\n" +
+	"\x10compose_override\x18\a \x01(\tR\x0fcomposeOverride\x12\x19\n" +
+	"\brepo_url\x18\b \x01(\tR\arepoUrl\x12\x16\n" +
+	"\x06branch\x18\t \x01(\tR\x06branch\x12'\n" +
+	"\x0fdockerfile_path\x18\n" +
+	" \x01(\tR\x0edockerfilePath\x12\x1b\n" +
+	"\tgit_token\x18\v \x01(\tR\bgitToken\x12@\n" +
+	"\rhealth_config\x18\f \x01(\v2\x1b.clank.v1.HealthCheckConfigR\fhealthConfig\x12\x18\n" +
+	"\adomains\x18\r \x03(\tR\adomains\x12A\n" +
+	"\x0fresource_config\x18\x0e \x01(\v2\x18.clank.v1.ResourceConfigR\x0eresourceConfig\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb3\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc9\x01\n" +
+	"\x11HealthCheckConfig\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x12'\n" +
+	"\x0ftimeout_seconds\x18\x02 \x01(\x05R\x0etimeoutSeconds\x12\x18\n" +
+	"\aretries\x18\x03 \x01(\x05R\aretries\x12)\n" +
+	"\x10interval_seconds\x18\x04 \x01(\x05R\x0fintervalSeconds\x122\n" +
+	"\x15startup_grace_seconds\x18\x05 \x01(\x05R\x13startupGraceSeconds\"U\n" +
+	"\x0eResourceConfig\x12\x1b\n" +
+	"\tcpu_limit\x18\x01 \x01(\x01R\bcpuLimit\x12&\n" +
+	"\x0fmemory_limit_mb\x18\x02 \x01(\x05R\rmemoryLimitMb\"\xe4\x01\n" +
+	"\x10ContainerCommand\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12#\n" +
+	"\rdeployment_id\x18\x02 \x01(\tR\fdeploymentId\x12%\n" +
+	"\x0econtainer_name\x18\x03 \x01(\tR\rcontainerName\x129\n" +
+	"\x06action\x18\x04 \x01(\x0e2!.clank.v1.ContainerCommand.ActionR\x06action\"*\n" +
+	"\x06Action\x12\b\n" +
+	"\x04STOP\x10\x00\x12\t\n" +
+	"\x05START\x10\x01\x12\v\n" +
+	"\aRESTART\x10\x02\"\xb3\x01\n" +
 	"\x0eSecretDelivery\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12@\n" +
 	"\benv_vars\x18\x02 \x03(\v2%.clank.v1.SecretDelivery.EnvVarsEntryR\aenvVars\x1a:\n" +
@@ -1315,58 +1720,67 @@ func file_clank_v1_agent_proto_rawDescGZIP() []byte {
 	return file_clank_v1_agent_proto_rawDescData
 }
 
-var file_clank_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_clank_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_clank_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_clank_v1_agent_proto_goTypes = []any{
-	(*EnrollRequest)(nil),   // 0: clank.v1.EnrollRequest
-	(*EnrollResponse)(nil),  // 1: clank.v1.EnrollResponse
-	(*SystemInfo)(nil),      // 2: clank.v1.SystemInfo
-	(*AgentMessage)(nil),    // 3: clank.v1.AgentMessage
-	(*Heartbeat)(nil),       // 4: clank.v1.Heartbeat
-	(*ContainerStatus)(nil), // 5: clank.v1.ContainerStatus
-	(*DeployProgress)(nil),  // 6: clank.v1.DeployProgress
-	(*CommandResult)(nil),   // 7: clank.v1.CommandResult
-	(*ControlMessage)(nil),  // 8: clank.v1.ControlMessage
-	(*DeployCommand)(nil),   // 9: clank.v1.DeployCommand
-	(*SecretDelivery)(nil),  // 10: clank.v1.SecretDelivery
-	(*CertRotation)(nil),    // 11: clank.v1.CertRotation
-	(*Ping)(nil),            // 12: clank.v1.Ping
-	(*LogEntry)(nil),        // 13: clank.v1.LogEntry
-	(*LogAck)(nil),          // 14: clank.v1.LogAck
-	(*MetricBatch)(nil),     // 15: clank.v1.MetricBatch
-	(*Metric)(nil),          // 16: clank.v1.Metric
-	(*MetricAck)(nil),       // 17: clank.v1.MetricAck
-	nil,                     // 18: clank.v1.DeployCommand.EnvVarsEntry
-	nil,                     // 19: clank.v1.SecretDelivery.EnvVarsEntry
-	nil,                     // 20: clank.v1.Metric.LabelsEntry
+	(ContainerCommand_Action)(0), // 0: clank.v1.ContainerCommand.Action
+	(*EnrollRequest)(nil),        // 1: clank.v1.EnrollRequest
+	(*EnrollResponse)(nil),       // 2: clank.v1.EnrollResponse
+	(*SystemInfo)(nil),           // 3: clank.v1.SystemInfo
+	(*AgentMessage)(nil),         // 4: clank.v1.AgentMessage
+	(*Heartbeat)(nil),            // 5: clank.v1.Heartbeat
+	(*ContainerStatus)(nil),      // 6: clank.v1.ContainerStatus
+	(*DeployProgress)(nil),       // 7: clank.v1.DeployProgress
+	(*CommandResult)(nil),        // 8: clank.v1.CommandResult
+	(*ControlMessage)(nil),       // 9: clank.v1.ControlMessage
+	(*DeployCommand)(nil),        // 10: clank.v1.DeployCommand
+	(*HealthCheckConfig)(nil),    // 11: clank.v1.HealthCheckConfig
+	(*ResourceConfig)(nil),       // 12: clank.v1.ResourceConfig
+	(*ContainerCommand)(nil),     // 13: clank.v1.ContainerCommand
+	(*SecretDelivery)(nil),       // 14: clank.v1.SecretDelivery
+	(*CertRotation)(nil),         // 15: clank.v1.CertRotation
+	(*Ping)(nil),                 // 16: clank.v1.Ping
+	(*LogEntry)(nil),             // 17: clank.v1.LogEntry
+	(*LogAck)(nil),               // 18: clank.v1.LogAck
+	(*MetricBatch)(nil),          // 19: clank.v1.MetricBatch
+	(*Metric)(nil),               // 20: clank.v1.Metric
+	(*MetricAck)(nil),            // 21: clank.v1.MetricAck
+	nil,                          // 22: clank.v1.DeployCommand.EnvVarsEntry
+	nil,                          // 23: clank.v1.SecretDelivery.EnvVarsEntry
+	nil,                          // 24: clank.v1.Metric.LabelsEntry
 }
 var file_clank_v1_agent_proto_depIdxs = []int32{
-	2,  // 0: clank.v1.EnrollRequest.system_info:type_name -> clank.v1.SystemInfo
-	4,  // 1: clank.v1.AgentMessage.heartbeat:type_name -> clank.v1.Heartbeat
-	6,  // 2: clank.v1.AgentMessage.deploy_progress:type_name -> clank.v1.DeployProgress
-	7,  // 3: clank.v1.AgentMessage.command_result:type_name -> clank.v1.CommandResult
-	2,  // 4: clank.v1.Heartbeat.system_info:type_name -> clank.v1.SystemInfo
-	5,  // 5: clank.v1.Heartbeat.containers:type_name -> clank.v1.ContainerStatus
-	9,  // 6: clank.v1.ControlMessage.deploy:type_name -> clank.v1.DeployCommand
-	10, // 7: clank.v1.ControlMessage.secret:type_name -> clank.v1.SecretDelivery
-	11, // 8: clank.v1.ControlMessage.cert_rotation:type_name -> clank.v1.CertRotation
-	12, // 9: clank.v1.ControlMessage.ping:type_name -> clank.v1.Ping
-	18, // 10: clank.v1.DeployCommand.env_vars:type_name -> clank.v1.DeployCommand.EnvVarsEntry
-	19, // 11: clank.v1.SecretDelivery.env_vars:type_name -> clank.v1.SecretDelivery.EnvVarsEntry
-	16, // 12: clank.v1.MetricBatch.metrics:type_name -> clank.v1.Metric
-	20, // 13: clank.v1.Metric.labels:type_name -> clank.v1.Metric.LabelsEntry
-	0,  // 14: clank.v1.AgentEnrollmentService.Enroll:input_type -> clank.v1.EnrollRequest
-	3,  // 15: clank.v1.AgentControlService.Connect:input_type -> clank.v1.AgentMessage
-	13, // 16: clank.v1.AgentControlService.StreamLogs:input_type -> clank.v1.LogEntry
-	15, // 17: clank.v1.AgentControlService.StreamMetrics:input_type -> clank.v1.MetricBatch
-	1,  // 18: clank.v1.AgentEnrollmentService.Enroll:output_type -> clank.v1.EnrollResponse
-	8,  // 19: clank.v1.AgentControlService.Connect:output_type -> clank.v1.ControlMessage
-	14, // 20: clank.v1.AgentControlService.StreamLogs:output_type -> clank.v1.LogAck
-	17, // 21: clank.v1.AgentControlService.StreamMetrics:output_type -> clank.v1.MetricAck
-	18, // [18:22] is the sub-list for method output_type
-	14, // [14:18] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	3,  // 0: clank.v1.EnrollRequest.system_info:type_name -> clank.v1.SystemInfo
+	5,  // 1: clank.v1.AgentMessage.heartbeat:type_name -> clank.v1.Heartbeat
+	7,  // 2: clank.v1.AgentMessage.deploy_progress:type_name -> clank.v1.DeployProgress
+	8,  // 3: clank.v1.AgentMessage.command_result:type_name -> clank.v1.CommandResult
+	3,  // 4: clank.v1.Heartbeat.system_info:type_name -> clank.v1.SystemInfo
+	6,  // 5: clank.v1.Heartbeat.containers:type_name -> clank.v1.ContainerStatus
+	10, // 6: clank.v1.ControlMessage.deploy:type_name -> clank.v1.DeployCommand
+	14, // 7: clank.v1.ControlMessage.secret:type_name -> clank.v1.SecretDelivery
+	15, // 8: clank.v1.ControlMessage.cert_rotation:type_name -> clank.v1.CertRotation
+	16, // 9: clank.v1.ControlMessage.ping:type_name -> clank.v1.Ping
+	13, // 10: clank.v1.ControlMessage.container_cmd:type_name -> clank.v1.ContainerCommand
+	22, // 11: clank.v1.DeployCommand.env_vars:type_name -> clank.v1.DeployCommand.EnvVarsEntry
+	11, // 12: clank.v1.DeployCommand.health_config:type_name -> clank.v1.HealthCheckConfig
+	12, // 13: clank.v1.DeployCommand.resource_config:type_name -> clank.v1.ResourceConfig
+	0,  // 14: clank.v1.ContainerCommand.action:type_name -> clank.v1.ContainerCommand.Action
+	23, // 15: clank.v1.SecretDelivery.env_vars:type_name -> clank.v1.SecretDelivery.EnvVarsEntry
+	20, // 16: clank.v1.MetricBatch.metrics:type_name -> clank.v1.Metric
+	24, // 17: clank.v1.Metric.labels:type_name -> clank.v1.Metric.LabelsEntry
+	1,  // 18: clank.v1.AgentEnrollmentService.Enroll:input_type -> clank.v1.EnrollRequest
+	4,  // 19: clank.v1.AgentControlService.Connect:input_type -> clank.v1.AgentMessage
+	17, // 20: clank.v1.AgentControlService.StreamLogs:input_type -> clank.v1.LogEntry
+	19, // 21: clank.v1.AgentControlService.StreamMetrics:input_type -> clank.v1.MetricBatch
+	2,  // 22: clank.v1.AgentEnrollmentService.Enroll:output_type -> clank.v1.EnrollResponse
+	9,  // 23: clank.v1.AgentControlService.Connect:output_type -> clank.v1.ControlMessage
+	18, // 24: clank.v1.AgentControlService.StreamLogs:output_type -> clank.v1.LogAck
+	21, // 25: clank.v1.AgentControlService.StreamMetrics:output_type -> clank.v1.MetricAck
+	22, // [22:26] is the sub-list for method output_type
+	18, // [18:22] is the sub-list for method input_type
+	18, // [18:18] is the sub-list for extension type_name
+	18, // [18:18] is the sub-list for extension extendee
+	0,  // [0:18] is the sub-list for field type_name
 }
 
 func init() { file_clank_v1_agent_proto_init() }
@@ -1384,19 +1798,21 @@ func file_clank_v1_agent_proto_init() {
 		(*ControlMessage_Secret)(nil),
 		(*ControlMessage_CertRotation)(nil),
 		(*ControlMessage_Ping)(nil),
+		(*ControlMessage_ContainerCmd)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clank_v1_agent_proto_rawDesc), len(file_clank_v1_agent_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   21,
+			NumEnums:      1,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
 		GoTypes:           file_clank_v1_agent_proto_goTypes,
 		DependencyIndexes: file_clank_v1_agent_proto_depIdxs,
+		EnumInfos:         file_clank_v1_agent_proto_enumTypes,
 		MessageInfos:      file_clank_v1_agent_proto_msgTypes,
 	}.Build()
 	File_clank_v1_agent_proto = out.File

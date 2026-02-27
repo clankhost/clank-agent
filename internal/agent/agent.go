@@ -6,7 +6,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/anaremore/clank/apps/agent/internal/build"
 	"github.com/anaremore/clank/apps/agent/internal/certs"
+	"github.com/anaremore/clank/apps/agent/internal/deploy"
+	"github.com/anaremore/clank/apps/agent/internal/docker"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
 	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
 )
@@ -22,6 +25,10 @@ type Agent struct {
 	cfg          *Config
 	agentVersion string
 	certStore    *certs.Store
+	dockerMgr    *docker.Manager
+	builder      *build.Builder
+	deployer     *deploy.Deployer
+	handler      *CommandHandler
 }
 
 // New creates a new Agent from the given config.
@@ -30,10 +37,25 @@ func New(cfg *Config, agentVersion string) (*Agent, error) {
 	if !store.Exists() {
 		return nil, fmt.Errorf("certificates not found in %s — run 'clank-agent enroll' first", cfg.CertDir)
 	}
+
+	// Initialize Docker manager
+	dockerMgr, err := docker.NewManager()
+	if err != nil {
+		return nil, fmt.Errorf("initializing docker: %w", err)
+	}
+
+	b := build.NewBuilder(dockerMgr)
+	d := deploy.NewDeployer(dockerMgr)
+	h := NewCommandHandler(dockerMgr, b, d)
+
 	return &Agent{
 		cfg:          cfg,
 		agentVersion: agentVersion,
 		certStore:    store,
+		dockerMgr:    dockerMgr,
+		builder:      b,
+		deployer:     d,
+		handler:      h,
 	}, nil
 }
 
@@ -41,6 +63,11 @@ func New(cfg *Config, agentVersion string) (*Agent, error) {
 // It reconnects on errors with exponential backoff.
 // Returns when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	// Ensure Traefik is running on this host
+	if err := a.dockerMgr.EnsureTraefik(ctx); err != nil {
+		log.Printf("Warning: could not ensure Traefik is running: %v", err)
+	}
+
 	wait := reconnectBaseWait
 
 	for {
@@ -88,9 +115,6 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 
 	log.Println("Connected to control plane")
 
-	// Reset backoff on successful connection
-	// (caller handles this since we return nil on graceful close)
-
 	// Start heartbeat sender in a goroutine
 	heartbeatCtx, heartbeatCancel := context.WithCancel(ctx)
 	defer heartbeatCancel()
@@ -101,8 +125,12 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	}()
 
 	// Receive loop — listen for commands from control plane
+	handlers := grpcclient.CommandHandlers{
+		OnDeploy:           a.handler.HandleDeploy,
+		OnContainerCommand: a.handler.HandleContainerCommand,
+	}
 	go func() {
-		errCh <- grpcclient.ReceiveCommands(stream)
+		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)
 	}()
 
 	// Wait for either goroutine to finish or context cancellation
@@ -119,7 +147,8 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 	defer ticker.Stop()
 
 	// Send initial heartbeat immediately
-	if err := grpcclient.SendHeartbeat(stream, a.collectInfo()); err != nil {
+	info, containers := a.collectInfo()
+	if err := grpcclient.SendHeartbeat(stream, info, containers); err != nil {
 		return fmt.Errorf("sending heartbeat: %w", err)
 	}
 	log.Println("Sent initial heartbeat")
@@ -129,7 +158,8 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := grpcclient.SendHeartbeat(stream, a.collectInfo()); err != nil {
+			info, containers := a.collectInfo()
+			if err := grpcclient.SendHeartbeat(stream, info, containers); err != nil {
 				return fmt.Errorf("sending heartbeat: %w", err)
 			}
 			log.Println("Heartbeat sent")
@@ -137,8 +167,23 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 	}
 }
 
-func (a *Agent) collectInfo() *sysinfo.Info {
+func (a *Agent) collectInfo() (*sysinfo.Info, []sysinfo.ContainerStatus) {
 	info := sysinfo.Collect()
 	info.AgentVersion = a.agentVersion
-	return info
+
+	// Collect managed container statuses for heartbeat
+	var statuses []sysinfo.ContainerStatus
+	managed, err := a.dockerMgr.ListManagedContainers(context.Background())
+	if err == nil {
+		for _, c := range managed {
+			statuses = append(statuses, sysinfo.ContainerStatus{
+				ContainerID: c.ContainerID,
+				Name:        c.Name,
+				State:       c.State,
+				Image:       c.Image,
+			})
+		}
+	}
+
+	return info, statuses
 }

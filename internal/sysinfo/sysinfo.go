@@ -22,6 +22,14 @@ type Info struct {
 	AgentVersion  string
 }
 
+// ContainerStatus describes a managed container (for heartbeat reporting).
+type ContainerStatus struct {
+	ContainerID string
+	Name        string
+	State       string
+	Image       string
+}
+
 // Collect gathers system information from the host.
 func Collect() *Info {
 	hostname, _ := os.Hostname()
