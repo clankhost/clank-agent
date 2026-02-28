@@ -60,13 +60,22 @@ func DialEnrollment(endpoint, caFingerprint string) (*grpc.ClientConn, error) {
 	return conn, nil
 }
 
+// tunnelTarget ensures the endpoint has a port (default 443 for TLS).
+func tunnelTarget(endpoint string) string {
+	if !strings.Contains(endpoint, ":") {
+		return endpoint + ":443"
+	}
+	return endpoint
+}
+
 // DialTunnel connects via standard TLS (system CA pool) for tunnel-mode
 // enrollment through Cloudflare Tunnel.
 func DialTunnel(endpoint string) (*grpc.ClientConn, error) {
+	target := tunnelTarget(endpoint)
 	creds := credentials.NewTLS(&tls.Config{}) // System CA pool
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(creds))
+	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
 	if err != nil {
-		return nil, fmt.Errorf("connecting to %s: %w", endpoint, err)
+		return nil, fmt.Errorf("connecting to %s: %w", target, err)
 	}
 	return conn, nil
 }
@@ -75,14 +84,15 @@ func DialTunnel(endpoint string) (*grpc.ClientConn, error) {
 // injected into every RPC call. Used by tunnel-mode agents for the
 // control connection (no mTLS, Cloudflare terminates TLS).
 func DialTunnelWithAuth(endpoint, authToken string) (*grpc.ClientConn, error) {
+	target := tunnelTarget(endpoint)
 	creds := credentials.NewTLS(&tls.Config{}) // System CA pool
 	conn, err := grpc.NewClient(
-		endpoint,
+		target,
 		grpc.WithTransportCredentials(creds),
 		grpc.WithPerRPCCredentials(&jwtCredentials{token: authToken}),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("connecting to %s: %w", endpoint, err)
+		return nil, fmt.Errorf("connecting to %s: %w", target, err)
 	}
 	return conn, nil
 }
