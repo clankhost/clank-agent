@@ -14,6 +14,8 @@ type Config struct {
 	ServerID     string `yaml:"server_id"`
 	GRPCEndpoint string `yaml:"grpc_endpoint"`
 	CertDir      string `yaml:"cert_dir"`
+	AuthMode     string `yaml:"auth_mode,omitempty"`  // "mtls" (default) or "token"
+	AuthToken    string `yaml:"auth_token,omitempty"` // JWT for tunnel mode
 }
 
 // DefaultConfigDir returns the platform-appropriate config directory.

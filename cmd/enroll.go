@@ -20,6 +20,7 @@ var (
 	enrollToken         string
 	enrollServer        string
 	enrollCAFingerprint string
+	enrollMode          string
 )
 
 func runEnroll(cmd *cobra.Command, args []string) error {
@@ -30,7 +31,9 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--server is required")
 	}
 
-	if enrollCAFingerprint == "" {
+	isTunnel := enrollMode == "tunnel"
+
+	if !isTunnel && enrollCAFingerprint == "" {
 		fmt.Println("WARNING: --ca-fingerprint not provided. The server certificate will NOT be")
 		fmt.Println("verified during enrollment. This is vulnerable to man-in-the-middle attacks.")
 		fmt.Println("For production use, always supply the CA fingerprint shown in the Clank UI.")
@@ -43,35 +46,60 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 		configDir = cfgFile
 	}
 
-	fmt.Printf("Enrolling with %s...\n", enrollServer)
+	if isTunnel {
+		fmt.Printf("Enrolling via tunnel with %s...\n", enrollServer)
+	} else {
+		fmt.Printf("Enrolling with %s...\n", enrollServer)
+	}
 
 	// Collect system information
 	info := sysinfo.Collect()
 	info.AgentVersion = Version
 
-	// Call the enrollment RPC (verifies CA fingerprint if provided)
-	resp, err := grpcclient.Enroll(enrollServer, enrollToken, enrollCAFingerprint, info)
+	// Call the enrollment RPC
+	var resp *grpcclient.EnrollResponse
+	var err error
+	if isTunnel {
+		resp, err = grpcclient.EnrollTunnel(enrollServer, enrollToken, info)
+	} else {
+		resp, err = grpcclient.Enroll(enrollServer, enrollToken, enrollCAFingerprint, info)
+	}
 	if err != nil {
 		return fmt.Errorf("enrollment failed: %w", err)
 	}
 
-	// Save certificates
+	// Save certificates (useful for both modes — direct mode needs them,
+	// tunnel mode stores them as backup)
 	store := certs.NewStore(configDir)
 	if err := store.Save(resp.ClientCert, resp.ClientKey, resp.CaCert); err != nil {
 		return fmt.Errorf("saving certificates: %w", err)
 	}
 
-	// Write agent config
+	// Determine auth mode and endpoint for the agent config
+	authMode := "mtls"
+	authToken := ""
+	grpcEndpoint := resp.GrpcEndpoint
+	if isTunnel {
+		authMode = "token"
+		authToken = resp.AuthToken
+		if resp.TunnelEndpoint != "" {
+			grpcEndpoint = resp.TunnelEndpoint
+		}
+	}
+
 	cfg := &agent.Config{
 		ServerID:     resp.ServerId,
-		GRPCEndpoint: resp.GrpcEndpoint,
+		GRPCEndpoint: grpcEndpoint,
 		CertDir:      configDir,
+		AuthMode:     authMode,
+		AuthToken:    authToken,
 	}
 	if err := agent.SaveConfig(configDir, cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)
 	}
 
 	fmt.Printf("Enrolled successfully! Server ID: %s\n", resp.ServerId)
+	fmt.Printf("Auth mode: %s\n", authMode)
 	fmt.Printf("Config saved to %s\n", configDir)
 	fmt.Println("Run 'clank-agent run' to start the agent.")
 	return nil
@@ -82,5 +110,7 @@ func init() {
 	enrollCmd.Flags().StringVar(&enrollServer, "server", "", "gRPC endpoint host:port (required)")
 	enrollCmd.Flags().StringVar(&enrollCAFingerprint, "ca-fingerprint", "",
 		"SHA-256 fingerprint of the control plane CA cert (format: sha256:<hex>)")
+	enrollCmd.Flags().StringVar(&enrollMode, "mode", "direct",
+		"connection mode: 'direct' for mTLS or 'tunnel' for Cloudflare Tunnel (JWT auth)")
 	rootCmd.AddCommand(enrollCmd)
 }

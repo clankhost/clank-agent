@@ -1,8 +1,10 @@
 package grpcclient
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -34,7 +36,7 @@ func DialEnrollment(endpoint, caFingerprint string) (*grpc.ClientConn, error) {
 
 	if caFingerprint != "" {
 		expectedHex := strings.TrimPrefix(strings.ToLower(caFingerprint), "sha256:")
-		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*tls.Certificate) error {
+		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			if len(rawCerts) == 0 {
 				return fmt.Errorf("server presented no certificate")
 			}
@@ -56,6 +58,49 @@ func DialEnrollment(endpoint, caFingerprint string) (*grpc.ClientConn, error) {
 		return nil, fmt.Errorf("connecting to %s: %w", endpoint, err)
 	}
 	return conn, nil
+}
+
+// DialTunnel connects via standard TLS (system CA pool) for tunnel-mode
+// enrollment through Cloudflare Tunnel.
+func DialTunnel(endpoint string) (*grpc.ClientConn, error) {
+	creds := credentials.NewTLS(&tls.Config{}) // System CA pool
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		return nil, fmt.Errorf("connecting to %s: %w", endpoint, err)
+	}
+	return conn, nil
+}
+
+// DialTunnelWithAuth connects via standard TLS with a JWT bearer token
+// injected into every RPC call. Used by tunnel-mode agents for the
+// control connection (no mTLS, Cloudflare terminates TLS).
+func DialTunnelWithAuth(endpoint, authToken string) (*grpc.ClientConn, error) {
+	creds := credentials.NewTLS(&tls.Config{}) // System CA pool
+	conn, err := grpc.NewClient(
+		endpoint,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithPerRPCCredentials(&jwtCredentials{token: authToken}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connecting to %s: %w", endpoint, err)
+	}
+	return conn, nil
+}
+
+// jwtCredentials implements grpc.PerRPCCredentials to inject a JWT bearer
+// token into the "authorization" metadata of every RPC call.
+type jwtCredentials struct {
+	token string
+}
+
+func (j *jwtCredentials) GetRequestMetadata(_ context.Context, _ ...string) (map[string]string, error) {
+	return map[string]string{
+		"authorization": "Bearer " + j.token,
+	}, nil
+}
+
+func (j *jwtCredentials) RequireTransportSecurity() bool {
+	return true
 }
 
 // DialPlaintext connects without TLS. Only for local development.

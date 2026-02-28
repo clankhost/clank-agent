@@ -41,7 +41,8 @@ type Agent struct {
 // New creates a new Agent from the given config.
 func New(cfg *Config, agentVersion string) (*Agent, error) {
 	store := certs.NewStore(cfg.CertDir)
-	if !store.Exists() {
+	// Cert files are required for mTLS mode; tunnel mode uses JWT instead
+	if cfg.AuthMode != "token" && !store.Exists() {
 		return nil, fmt.Errorf("certificates not found in %s — run 'clank-agent enroll' first", cfg.CertDir)
 	}
 
@@ -112,12 +113,20 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // connectAndStream establishes the bidi stream and runs the heartbeat loop.
 func (a *Agent) connectAndStream(ctx context.Context) error {
-	tlsCreds, err := a.certStore.TransportCredentials()
-	if err != nil {
-		return fmt.Errorf("loading TLS credentials: %w", err)
-	}
+	var conn *grpc.ClientConn
+	var err error
 
-	conn, err := grpcclient.Dial(a.cfg.GRPCEndpoint, tlsCreds)
+	if a.cfg.AuthMode == "token" {
+		// Tunnel mode: standard TLS + JWT bearer token
+		conn, err = grpcclient.DialTunnelWithAuth(a.cfg.GRPCEndpoint, a.cfg.AuthToken)
+	} else {
+		// Direct mode: mTLS with client certificate
+		tlsCreds, credErr := a.certStore.TransportCredentials()
+		if credErr != nil {
+			return fmt.Errorf("loading TLS credentials: %w", credErr)
+		}
+		conn, err = grpcclient.Dial(a.cfg.GRPCEndpoint, tlsCreds)
+	}
 	if err != nil {
 		return fmt.Errorf("dialing %s: %w", a.cfg.GRPCEndpoint, err)
 	}
