@@ -1,8 +1,11 @@
 package grpcclient
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -18,12 +21,35 @@ func Dial(endpoint string, creds credentials.TransportCredentials) (*grpc.Client
 	return conn, nil
 }
 
-// DialInsecure connects to the gRPC endpoint with server-only TLS
-// (no client cert). Used during enrollment before the agent has credentials.
-func DialInsecure(endpoint string) (*grpc.ClientConn, error) {
+// DialEnrollment connects to the gRPC endpoint for enrollment. If
+// caFingerprint is provided (format "sha256:<hex>"), the server certificate's
+// SHA-256 fingerprint is verified against it — preventing MITM during the
+// enrollment window when the agent has no CA cert yet.
+//
+// If caFingerprint is empty, falls back to InsecureSkipVerify (backward compat).
+func DialEnrollment(endpoint, caFingerprint string) (*grpc.ClientConn, error) {
 	tlsCfg := &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // Enrollment uses token auth; agent has no CA cert yet.
+		InsecureSkipVerify: true, //nolint:gosec // Enrollment: we verify fingerprint below if provided.
 	}
+
+	if caFingerprint != "" {
+		expectedHex := strings.TrimPrefix(strings.ToLower(caFingerprint), "sha256:")
+		tlsCfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*tls.Certificate) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("server presented no certificate")
+			}
+			digest := sha256.Sum256(rawCerts[0])
+			actualHex := hex.EncodeToString(digest[:])
+			if actualHex != expectedHex {
+				return fmt.Errorf(
+					"server certificate fingerprint mismatch:\n  expected: sha256:%s\n  actual:   sha256:%s",
+					expectedHex, actualHex,
+				)
+			}
+			return nil
+		}
+	}
+
 	creds := credentials.NewTLS(tlsCfg)
 	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(creds))
 	if err != nil {

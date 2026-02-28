@@ -17,8 +17,9 @@ var enrollCmd = &cobra.Command{
 }
 
 var (
-	enrollToken  string
-	enrollServer string
+	enrollToken         string
+	enrollServer        string
+	enrollCAFingerprint string
 )
 
 func runEnroll(cmd *cobra.Command, args []string) error {
@@ -27,6 +28,13 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	}
 	if enrollServer == "" {
 		return fmt.Errorf("--server is required")
+	}
+
+	if enrollCAFingerprint == "" {
+		fmt.Println("WARNING: --ca-fingerprint not provided. The server certificate will NOT be")
+		fmt.Println("verified during enrollment. This is vulnerable to man-in-the-middle attacks.")
+		fmt.Println("For production use, always supply the CA fingerprint shown in the Clank UI.")
+		fmt.Println()
 	}
 
 	// Determine config/cert directory
@@ -41,8 +49,8 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	info := sysinfo.Collect()
 	info.AgentVersion = Version
 
-	// Call the enrollment RPC (uses TLS without client cert)
-	resp, err := grpcclient.Enroll(enrollServer, enrollToken, info)
+	// Call the enrollment RPC (verifies CA fingerprint if provided)
+	resp, err := grpcclient.Enroll(enrollServer, enrollToken, enrollCAFingerprint, info)
 	if err != nil {
 		return fmt.Errorf("enrollment failed: %w", err)
 	}
@@ -72,5 +80,7 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 func init() {
 	enrollCmd.Flags().StringVar(&enrollToken, "token", "", "enrollment token (required)")
 	enrollCmd.Flags().StringVar(&enrollServer, "server", "", "gRPC endpoint host:port (required)")
+	enrollCmd.Flags().StringVar(&enrollCAFingerprint, "ca-fingerprint", "",
+		"SHA-256 fingerprint of the control plane CA cert (format: sha256:<hex>)")
 	rootCmd.AddCommand(enrollCmd)
 }

@@ -10,9 +10,10 @@ import (
 )
 
 // Enroll calls the AgentEnrollmentService.Enroll RPC.
-// Uses InsecureSkipVerify since the agent has no CA cert yet.
-func Enroll(endpoint, token string, info *sysinfo.Info) (*clankv1.EnrollResponse, error) {
-	conn, err := DialInsecure(endpoint)
+// If caFingerprint is provided (format "sha256:<hex>"), the server certificate
+// is verified against it to prevent MITM attacks during enrollment.
+func Enroll(endpoint, token, caFingerprint string, info *sysinfo.Info) (*clankv1.EnrollResponse, error) {
+	conn, err := DialEnrollment(endpoint, caFingerprint)
 	if err != nil {
 		return nil, err
 	}
