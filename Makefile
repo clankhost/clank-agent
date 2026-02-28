@@ -7,7 +7,7 @@ LDFLAGS := -s -w \
 	-X github.com/anaremore/clank/apps/agent/cmd.Commit=$(COMMIT) \
 	-X github.com/anaremore/clank/apps/agent/cmd.Date=$(DATE)
 
-.PHONY: build test clean
+.PHONY: build test clean release-snapshot build-all
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
@@ -17,10 +17,22 @@ test:
 
 clean:
 	rm -f $(BINARY)
+	rm -rf dist/
+
+release-snapshot:
+	goreleaser release --snapshot --clean
 
 # Cross-compilation targets
+build-all: build-linux build-linux-arm64 build-darwin-amd64 build-darwin-arm64
+
 build-linux:
 	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-amd64 .
+
+build-linux-arm64:
+	GOOS=linux GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-arm64 .
+
+build-darwin-amd64:
+	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-amd64 .
 
 build-darwin-arm64:
 	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-arm64 .

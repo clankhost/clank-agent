@@ -1,0 +1,38 @@
+version: 2
+project_name: clank-agent
+
+builds:
+  - main: .
+    binary: clank-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/anaremore/clank/apps/agent/cmd.Version={{.Version}}
+      - -X github.com/anaremore/clank/apps/agent/cmd.Commit={{.ShortCommit}}
+      - -X github.com/anaremore/clank/apps/agent/cmd.Date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: "clank-agent_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+extra_files:
+  - glob: ../../install/install.sh
+  - glob: ../../install/systemd/clank-agent.service
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"

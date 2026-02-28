@@ -5,6 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/docker/docker/api/types/build"
@@ -316,6 +320,46 @@ func (m *Manager) ContainerLogs(ctx context.Context, containerID string, follow 
 // The caller must close the Body on the returned StatsResponseReader.
 func (m *Manager) ContainerStatsOneShot(ctx context.Context, containerID string) (container.StatsResponseReader, error) {
 	return m.cli.ContainerStatsOneShot(ctx, containerID)
+}
+
+// DetectDockerSocket returns the Docker socket URI for the current platform.
+// It checks DOCKER_HOST first, then falls back to platform-specific defaults.
+func DetectDockerSocket() string {
+	if host := os.Getenv("DOCKER_HOST"); host != "" {
+		return host
+	}
+	switch runtime.GOOS {
+	case "windows":
+		return "npipe:////./pipe/docker_engine"
+	case "darwin":
+		if _, err := os.Stat("/var/run/docker.sock"); err == nil {
+			return "unix:///var/run/docker.sock"
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			alt := filepath.Join(home, ".docker", "run", "docker.sock")
+			if _, err := os.Stat(alt); err == nil {
+				return "unix://" + alt
+			}
+		}
+		return "unix:///var/run/docker.sock"
+	default:
+		return "unix:///var/run/docker.sock"
+	}
+}
+
+// IsDockerAvailable checks if the Docker daemon is reachable.
+// Returns true and the Docker version string on success,
+// or false and an error description on failure.
+func IsDockerAvailable() (bool, string) {
+	out, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output()
+	if err != nil {
+		return false, fmt.Sprintf("docker not reachable: %v", err)
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return false, "docker returned empty version"
+	}
+	return true, version
 }
 
 func int64Ptr(v int64) *int64 {
