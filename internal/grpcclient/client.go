@@ -68,12 +68,25 @@ func tunnelTarget(endpoint string) string {
 	return endpoint
 }
 
+// tunnelHost extracts the hostname (without port) from an endpoint string.
+func tunnelHost(endpoint string) string {
+	if idx := strings.Index(endpoint, ":"); idx > 0 {
+		return endpoint[:idx]
+	}
+	return endpoint
+}
+
 // DialTunnel connects via standard TLS (system CA pool) for tunnel-mode
 // enrollment through Cloudflare Tunnel.
 func DialTunnel(endpoint string) (*grpc.ClientConn, error) {
 	target := tunnelTarget(endpoint)
-	creds := credentials.NewTLS(&tls.Config{}) // System CA pool
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(creds))
+	host := tunnelHost(endpoint)
+	creds := credentials.NewTLS(&tls.Config{ServerName: host})
+	conn, err := grpc.NewClient(
+		"dns:///"+target,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithAuthority(host),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("connecting to %s: %w", target, err)
 	}
@@ -85,10 +98,12 @@ func DialTunnel(endpoint string) (*grpc.ClientConn, error) {
 // control connection (no mTLS, Cloudflare terminates TLS).
 func DialTunnelWithAuth(endpoint, authToken string) (*grpc.ClientConn, error) {
 	target := tunnelTarget(endpoint)
-	creds := credentials.NewTLS(&tls.Config{}) // System CA pool
+	host := tunnelHost(endpoint)
+	creds := credentials.NewTLS(&tls.Config{ServerName: host})
 	conn, err := grpc.NewClient(
-		target,
+		"dns:///"+target,
 		grpc.WithTransportCredentials(creds),
+		grpc.WithAuthority(host),
 		grpc.WithPerRPCCredentials(&jwtCredentials{token: authToken}),
 	)
 	if err != nil {

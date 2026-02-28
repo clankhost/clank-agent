@@ -1,8 +1,13 @@
 package grpcclient
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
@@ -26,17 +31,121 @@ func Enroll(endpoint, token, caFingerprint string, info *sysinfo.Info) (*EnrollR
 	return callEnrollRPC(conn, token, info)
 }
 
-// EnrollTunnel calls the AgentEnrollmentService.Enroll RPC via Cloudflare
-// Tunnel. Uses standard TLS (system CA pool) since CF terminates TLS at the
-// edge and presents its own certificate.
+// EnrollTunnel performs enrollment via REST over HTTPS (Cloudflare Tunnel).
+// Cloudflare's gRPC proxy drops HTTP/2 trailing headers after DATA frames,
+// breaking gRPC unary responses. REST over HTTPS works reliably through CF.
 func EnrollTunnel(endpoint, token string, info *sysinfo.Info) (*EnrollResponse, error) {
-	conn, err := DialTunnel(endpoint)
-	if err != nil {
-		return nil, err
+	// Derive the HTTPS API base URL from the gRPC tunnel domain.
+	// grpc.clank.host → clank.host, grpc.dev.clank.host → dev.clank.host
+	host := endpoint
+	if len(host) > 5 && host[:5] == "grpc." {
+		host = host[5:]
 	}
-	defer conn.Close()
+	apiURL := fmt.Sprintf("https://%s/api/agent/enroll", host)
 
-	return callEnrollRPC(conn, token, info)
+	reqBody := restEnrollRequest{
+		Token: token,
+		SystemInfo: restSystemInfo{
+			Hostname:      info.Hostname,
+			OS:            info.OS,
+			Arch:          info.Arch,
+			CPUCores:      info.CPUCores,
+			MemoryBytes:   info.MemoryBytes,
+			DockerVersion: info.DockerVersion,
+			AgentVersion:  info.AgentVersion,
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("enrollment request to %s: %w", apiURL, err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Detail != "" {
+			return nil, fmt.Errorf("enrollment failed: %s", errResp.Detail)
+		}
+		return nil, fmt.Errorf("enrollment failed: HTTP %d", resp.StatusCode)
+	}
+
+	var restResp restEnrollResponse
+	if err := json.Unmarshal(respBody, &restResp); err != nil {
+		return nil, fmt.Errorf("parsing response: %w", err)
+	}
+
+	// Decode base64 cert fields
+	clientCert, err := base64.StdEncoding.DecodeString(restResp.ClientCert)
+	if err != nil {
+		return nil, fmt.Errorf("decoding client_cert: %w", err)
+	}
+	clientKey, err := base64.StdEncoding.DecodeString(restResp.ClientKey)
+	if err != nil {
+		return nil, fmt.Errorf("decoding client_key: %w", err)
+	}
+	caCert, err := base64.StdEncoding.DecodeString(restResp.CACert)
+	if err != nil {
+		return nil, fmt.Errorf("decoding ca_cert: %w", err)
+	}
+
+	return &EnrollResponse{
+		ServerId:       restResp.ServerID,
+		ClientCert:     clientCert,
+		ClientKey:      clientKey,
+		CaCert:         caCert,
+		GrpcEndpoint:   restResp.GRPCEndpoint,
+		AuthToken:      restResp.AuthToken,
+		TunnelEndpoint: restResp.TunnelEndpoint,
+	}, nil
+}
+
+// REST request/response types for tunnel enrollment.
+
+type restSystemInfo struct {
+	Hostname      string `json:"hostname"`
+	OS            string `json:"os"`
+	Arch          string `json:"arch"`
+	CPUCores      int64  `json:"cpu_cores"`
+	MemoryBytes   int64  `json:"memory_bytes"`
+	DockerVersion string `json:"docker_version"`
+	AgentVersion  string `json:"agent_version"`
+}
+
+type restEnrollRequest struct {
+	Token      string         `json:"token"`
+	SystemInfo restSystemInfo `json:"system_info"`
+}
+
+type restEnrollResponse struct {
+	ServerID       string `json:"server_id"`
+	ClientCert     string `json:"client_cert"`
+	ClientKey      string `json:"client_key"`
+	CACert         string `json:"ca_cert"`
+	GRPCEndpoint   string `json:"grpc_endpoint"`
+	AuthToken      string `json:"auth_token"`
+	TunnelEndpoint string `json:"tunnel_endpoint"`
 }
 
 func callEnrollRPC(conn *grpc.ClientConn, token string, info *sysinfo.Info) (*EnrollResponse, error) {

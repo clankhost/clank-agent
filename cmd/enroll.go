@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/anaremore/clank/apps/agent/internal/agent"
 	"github.com/anaremore/clank/apps/agent/internal/certs"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
 	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/grpclog"
 )
 
 var enrollCmd = &cobra.Command{
@@ -46,6 +48,11 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 		configDir = cfgFile
 	}
 
+	// Enable verbose gRPC logging for direct-mode debugging
+	if !isTunnel && os.Getenv("GRPC_DEBUG") == "1" {
+		grpclog.SetLoggerV2(grpclog.NewLoggerV2WithVerbosity(os.Stderr, os.Stderr, os.Stderr, 99))
+	}
+
 	if isTunnel {
 		fmt.Printf("Enrolling via tunnel with %s...\n", enrollServer)
 	} else {
@@ -56,7 +63,8 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	info := sysinfo.Collect()
 	info.AgentVersion = Version
 
-	// Call the enrollment RPC
+	// Tunnel mode: REST over HTTPS (Cloudflare gRPC proxy drops HTTP/2 trailers)
+	// Direct mode: gRPC over mTLS
 	var resp *grpcclient.EnrollResponse
 	var err error
 	if isTunnel {
