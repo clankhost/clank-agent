@@ -27,6 +27,15 @@ func NewDeployer(dm *docker.Manager) *Deployer {
 	return &Deployer{docker: dm}
 }
 
+// EndpointInfo mirrors the proto EndpointInfo for deploy-time label generation.
+type EndpointInfo struct {
+	EndpointID string
+	Provider   string
+	Hostname   string
+	PathPrefix string
+	TLSMode    string
+}
+
 // DeployOpts configures a deployment.
 type DeployOpts struct {
 	DeploymentID    string
@@ -35,6 +44,7 @@ type DeployOpts struct {
 	Env             map[string]string
 	Port            int
 	Domains         []string
+	Endpoints       []EndpointInfo
 	HealthCheckPath string
 	HealthConfig    HealthConfig
 	CPULimit        float64
@@ -83,8 +93,8 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		}
 	}
 
-	// Generate Traefik labels
-	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, opts.Port)
+	// Generate Traefik labels (endpoint-aware if endpoints are provided)
+	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, opts.Port, opts.Endpoints)
 
 	// Container name
 	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
@@ -187,10 +197,31 @@ func checkHTTPHealth(url string, timeoutSec int) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
-func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int) map[string]string {
+func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int, endpoints []EndpointInfo) map[string]string {
+	labels := map[string]string{
+		"traefik.enable":      "true",
+		"clank.managed":       "true",
+		"clank.service_slug":  serviceSlug,
+		"clank.deployment_id": deploymentID,
+	}
+
+	// Shared service port
+	svcName := "clank-" + serviceSlug
+	labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", svcName)] = fmt.Sprintf("%d", port)
+
+	// If endpoints are provided, generate per-endpoint labels
+	if len(endpoints) > 0 {
+		generateEndpointLabels(labels, serviceSlug, port, endpoints)
+		return labels
+	}
+
+	// Legacy: use domains if no endpoints (backward compat)
+	return generateLegacyLabels(labels, serviceSlug, domains)
+}
+
+func generateLegacyLabels(labels map[string]string, serviceSlug string, domains []string) map[string]string {
 	routerName := "clank-" + serviceSlug
 
-	// Filter domains through sanitizer
 	var safeDomains []string
 	for _, d := range domains {
 		if safeDomainRe.MatchString(d) && len(d) <= 253 {
@@ -203,22 +234,75 @@ func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, p
 		safeDomains = []string{serviceSlug + ".localhost"}
 	}
 
-	// Build Host() rules
 	var rules []string
 	for _, d := range safeDomains {
 		rules = append(rules, fmt.Sprintf("Host(`%s`)", d))
 	}
 	hostRules := strings.Join(rules, " || ")
 
-	labels := map[string]string{
-		"traefik.enable": "true",
-		fmt.Sprintf("traefik.http.routers.%s.rule", routerName):                         hostRules,
-		fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerName):                  "web",
-		fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", routerName):     fmt.Sprintf("%d", port),
-		"clank.managed":       "true",
-		"clank.service_slug":  serviceSlug,
-		"clank.deployment_id": deploymentID,
-	}
+	labels[fmt.Sprintf("traefik.http.routers.%s.rule", routerName)] = hostRules
+	labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerName)] = "web"
 
 	return labels
+}
+
+func generateEndpointLabels(labels map[string]string, serviceSlug string, port int, endpoints []EndpointInfo) {
+	svcName := "clank-" + serviceSlug
+
+	for i, ep := range endpoints {
+		hostname := ep.Hostname
+		if hostname == "" {
+			continue
+		}
+		if !safeDomainRe.MatchString(hostname) || len(hostname) > 253 {
+			log.Printf("Rejected unsafe hostname for endpoint %s: %q", ep.EndpointID, hostname)
+			continue
+		}
+
+		// Router name includes index to keep labels unique per endpoint
+		routerBase := fmt.Sprintf("clank-%s-ep%d", serviceSlug, i)
+
+		switch ep.Provider {
+		case "public_direct":
+			// HTTPS with Let's Encrypt certresolver + HTTP redirect
+			secureRouter := routerBase + "-secure"
+			labels[fmt.Sprintf("traefik.http.routers.%s.rule", secureRouter)] = fmt.Sprintf("Host(`%s`)", hostname)
+			labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", secureRouter)] = "websecure"
+			labels[fmt.Sprintf("traefik.http.routers.%s.tls.certresolver", secureRouter)] = "letsencrypt"
+			labels[fmt.Sprintf("traefik.http.routers.%s.service", secureRouter)] = svcName
+
+			// HTTP → HTTPS redirect
+			httpRouter := routerBase + "-http"
+			labels[fmt.Sprintf("traefik.http.routers.%s.rule", httpRouter)] = fmt.Sprintf("Host(`%s`)", hostname)
+			labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", httpRouter)] = "web"
+			labels[fmt.Sprintf("traefik.http.routers.%s.middlewares", httpRouter)] = routerBase + "-redirect"
+			labels[fmt.Sprintf("traefik.http.middlewares.%s-redirect.redirectscheme.scheme", routerBase)] = "https"
+
+		case "public_tunnel_cloudflare":
+			// HTTP only — Cloudflare terminates TLS at edge
+			labels[fmt.Sprintf("traefik.http.routers.%s.rule", routerBase)] = fmt.Sprintf("Host(`%s`)", hostname)
+			labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerBase)] = "web"
+			labels[fmt.Sprintf("traefik.http.routers.%s.service", routerBase)] = svcName
+
+		case "private_tailscale_https":
+			// Path-based routing on tailnet hostname with StripPrefix
+			rule := fmt.Sprintf("Host(`%s`)", hostname)
+			if ep.PathPrefix != "" {
+				rule = fmt.Sprintf("Host(`%s`) && PathPrefix(`%s`)", hostname, ep.PathPrefix)
+			}
+			labels[fmt.Sprintf("traefik.http.routers.%s.rule", routerBase)] = rule
+			labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerBase)] = "web"
+			labels[fmt.Sprintf("traefik.http.routers.%s.service", routerBase)] = svcName
+			if ep.PathPrefix != "" {
+				labels[fmt.Sprintf("traefik.http.routers.%s.middlewares", routerBase)] = routerBase + "-strip"
+				labels[fmt.Sprintf("traefik.http.middlewares.%s-strip.stripprefix.prefixes", routerBase)] = ep.PathPrefix
+			}
+
+		case "lan_only", "byo_proxy":
+			// HTTP router only
+			labels[fmt.Sprintf("traefik.http.routers.%s.rule", routerBase)] = fmt.Sprintf("Host(`%s`)", hostname)
+			labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerBase)] = "web"
+			labels[fmt.Sprintf("traefik.http.routers.%s.service", routerBase)] = svcName
+		}
+	}
 }

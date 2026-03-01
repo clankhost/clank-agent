@@ -68,3 +68,58 @@ func (m *Manager) EnsureCloudflared(ctx context.Context, tunnelToken string) err
 	log.Printf("Cloudflared started (container %s)", resp.ID[:12])
 	return nil
 }
+
+// EnsureCloudflaredNamed starts a named cloudflared tunnel container for BYO
+// Cloudflare endpoints.  Multiple named instances can coexist (one per unique
+// tunnel token).  The platform cloudflared (clank-cloudflared) is separate.
+func (m *Manager) EnsureCloudflaredNamed(ctx context.Context, name, tunnelToken string) error {
+	if tunnelToken == "" {
+		return fmt.Errorf("tunnel token is empty")
+	}
+
+	// Check if this named container is already running
+	id, _, err := m.FindContainerByLabel(ctx, "clank.cftunnel.name", name)
+	if err != nil {
+		return fmt.Errorf("checking for cloudflared %s: %w", name, err)
+	}
+	if id != "" {
+		log.Printf("Cloudflared %s already running", name)
+		return nil
+	}
+
+	log.Printf("Starting cloudflared %s...", name)
+
+	if err := m.PullImage(ctx, cloudflaredImage, func(msg string) {
+		log.Printf("  %s", msg)
+	}); err != nil {
+		return fmt.Errorf("pulling cloudflared image: %w", err)
+	}
+
+	config := &container.Config{
+		Image: cloudflaredImage,
+		Cmd:   []string{"tunnel", "run", "--token", tunnelToken},
+		Labels: map[string]string{
+			"clank.cftunnel.name":     name,
+			"clank.cftunnel.endpoint": "true",
+			"clank.managed":           "true",
+		},
+	}
+
+	hostConfig := &container.HostConfig{
+		NetworkMode:   "host",
+		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+	}
+
+	resp, err := m.cli.ContainerCreate(ctx, config, hostConfig, nil, nil, name)
+	if err != nil {
+		return fmt.Errorf("creating cloudflared %s: %w", name, err)
+	}
+
+	if err := m.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = m.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return fmt.Errorf("starting cloudflared %s: %w", name, err)
+	}
+
+	log.Printf("Cloudflared %s started (container %s)", name, resp.ID[:12])
+	return nil
+}

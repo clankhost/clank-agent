@@ -10,6 +10,7 @@ import (
 	"github.com/anaremore/clank/apps/agent/internal/build"
 	"github.com/anaremore/clank/apps/agent/internal/deploy"
 	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/anaremore/clank/apps/agent/internal/endpoint"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
 	"github.com/anaremore/clank/apps/agent/internal/selfupdate"
 )
@@ -19,6 +20,7 @@ type CommandHandler struct {
 	docker         *docker.Manager
 	builder        *build.Builder
 	deployer       *deploy.Deployer
+	endpointMgr    *endpoint.Manager
 	cfg            *Config
 	cfgDir         string
 	currentVersion string
@@ -26,10 +28,20 @@ type CommandHandler struct {
 
 // NewCommandHandler creates a handler with all agent capabilities.
 func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string, version string) *CommandHandler {
+	// Initialize endpoint providers
+	epMgr := endpoint.NewManager(
+		&endpoint.LANProvider{},
+		&endpoint.DirectProvider{},
+		endpoint.NewCFTunnelProvider(dm),
+		&endpoint.TailscaleProvider{},
+		&endpoint.BYOProxyProvider{},
+	)
+
 	return &CommandHandler{
 		docker:         dm,
 		builder:        b,
 		deployer:       d,
+		endpointMgr:    epMgr,
 		cfg:            cfg,
 		cfgDir:         cfgDir,
 		currentVersion: version,
@@ -116,6 +128,18 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		memoryLimitMB = int(rc.GetMemoryLimitMb())
 	}
 
+	// Map proto EndpointInfo to deploy.EndpointInfo
+	var endpoints []deploy.EndpointInfo
+	for _, ep := range cmd.GetActiveEndpoints() {
+		endpoints = append(endpoints, deploy.EndpointInfo{
+			EndpointID: ep.GetEndpointId(),
+			Provider:   ep.GetProvider(),
+			Hostname:   ep.GetHostname(),
+			PathPrefix: ep.GetPathPrefix(),
+			TLSMode:    ep.GetTlsMode(),
+		})
+	}
+
 	err := h.deployer.Deploy(ctx, deploy.DeployOpts{
 		DeploymentID:    deployID,
 		ServiceSlug:     cmd.GetServiceSlug(),
@@ -123,6 +147,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		Env:             cmd.GetEnvVars(),
 		Port:            int(cmd.GetPort()),
 		Domains:         cmd.GetDomains(),
+		Endpoints:       endpoints,
 		HealthCheckPath: cmd.GetHealthCheckPath(),
 		HealthConfig:    healthConfig,
 		CPULimit:        cpuLimit,
@@ -206,6 +231,76 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, cmd *clankv1.UpdateCo
 
 	log.Printf("Self-update to %s complete, exiting for restart...", cmd.GetVersion())
 	os.Exit(0)
+}
+
+// HandleEndpoint processes an EndpointCommand (ensure/disable/doctor).
+func (h *CommandHandler) HandleEndpoint(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.EndpointCommand) {
+	cfg := endpoint.ProviderConfig{
+		EndpointID:  cmd.GetEndpointId(),
+		ServiceSlug: cmd.GetServiceSlug(),
+		Hostname:    cmd.GetHostname(),
+		PathPrefix:  cmd.GetPathPrefix(),
+		Port:        int(cmd.GetPort()),
+		TLSMode:     cmd.GetTlsMode(),
+		Config:      cmd.GetProviderConfig(),
+	}
+
+	providerName := cmd.GetProvider()
+
+	// For public_direct, ensure Traefik has ACME before proceeding
+	if providerName == "public_direct" && cmd.GetAction() == clankv1.EndpointCommand_ENSURE {
+		if !h.docker.HasACME(ctx) {
+			log.Printf("Upgrading Traefik to ACME for public_direct endpoint")
+			if err := h.docker.ReconfigureTraefikACME(ctx); err != nil {
+				log.Printf("Warning: ACME reconfiguration failed: %v", err)
+			}
+		}
+	}
+
+	var result *endpoint.ProviderStatus
+	var err error
+
+	switch cmd.GetAction() {
+	case clankv1.EndpointCommand_ENSURE:
+		result, err = h.endpointMgr.HandleEnsure(ctx, cfg, providerName)
+	case clankv1.EndpointCommand_DISABLE:
+		result, err = h.endpointMgr.HandleDisable(ctx, cfg, providerName)
+	case clankv1.EndpointCommand_DOCTOR:
+		result, err = h.endpointMgr.HandleDoctor(ctx, cfg, providerName)
+	default:
+		log.Printf("Unknown endpoint action: %v", cmd.GetAction())
+		return
+	}
+
+	if err != nil {
+		result = &endpoint.ProviderStatus{
+			Status:  "error",
+			Message: fmt.Sprintf("Endpoint operation failed: %v", err),
+		}
+	}
+
+	// Send EndpointStatus back to control plane
+	diagnostics := result.Diagnostics
+	if diagnostics == nil {
+		diagnostics = map[string]string{}
+	}
+
+	msg := &clankv1.AgentMessage{
+		Payload: &clankv1.AgentMessage_EndpointStatus{
+			EndpointStatus: &clankv1.EndpointStatus{
+				CommandId:   cmd.GetCommandId(),
+				EndpointId:  cmd.GetEndpointId(),
+				Status:      result.Status,
+				Message:     result.Message,
+				ResolvedUrl: result.ResolvedURL,
+				VerifiedBy:  result.VerifiedBy,
+				Diagnostics: diagnostics,
+			},
+		},
+	}
+	if err := stream.Send(msg); err != nil {
+		log.Printf("Failed to send endpoint status: %v", err)
+	}
 }
 
 // HandleTunnelConfig saves tunnel credentials and starts cloudflared.

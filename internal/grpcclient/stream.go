@@ -26,12 +26,16 @@ type TunnelConfigHandler func(ctx context.Context, cfg *clankv1.TunnelConfig)
 // UpdateHandler handles self-update commands from the control plane.
 type UpdateHandler func(ctx context.Context, cmd *clankv1.UpdateCommand)
 
+// EndpointHandler handles endpoint management commands.
+type EndpointHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.EndpointCommand)
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
 	OnDeploy           DeployHandler
 	OnContainerCommand ContainerCommandHandler
 	OnTunnelConfig     TunnelConfigHandler
 	OnUpdate           UpdateHandler
+	OnEndpoint         EndpointHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -140,6 +144,19 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 						}
 					}()
 					handlers.OnUpdate(ctx, p.Update)
+				}()
+			}
+
+		case *clankv1.ControlMessage_EndpointCmd:
+			log.Printf("Received endpoint command %s: %s %s", p.EndpointCmd.GetCommandId(), p.EndpointCmd.GetAction(), p.EndpointCmd.GetProvider())
+			if handlers.OnEndpoint != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in endpoint handler: %v", r)
+						}
+					}()
+					handlers.OnEndpoint(ctx, stream, p.EndpointCmd)
 				}()
 			}
 
