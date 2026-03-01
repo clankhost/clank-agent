@@ -39,7 +39,7 @@ type Agent struct {
 }
 
 // New creates a new Agent from the given config.
-func New(cfg *Config, agentVersion string) (*Agent, error) {
+func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 	store := certs.NewStore(cfg.CertDir)
 	// Cert files are required for mTLS mode; tunnel mode uses JWT instead
 	if cfg.AuthMode != "token" && !store.Exists() {
@@ -54,7 +54,7 @@ func New(cfg *Config, agentVersion string) (*Agent, error) {
 
 	b := build.NewBuilder(dockerMgr)
 	d := deploy.NewDeployer(dockerMgr)
-	h := NewCommandHandler(dockerMgr, b, d)
+	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgDir)
 	lc := logs.NewCollector(dockerMgr)
 	mc := metrics.NewCollector(dockerMgr, cfg.ServerID)
 
@@ -78,6 +78,13 @@ func (a *Agent) Run(ctx context.Context) error {
 	// Ensure Traefik is running on this host
 	if err := a.dockerMgr.EnsureTraefik(ctx); err != nil {
 		log.Printf("Warning: could not ensure Traefik is running: %v", err)
+	}
+
+	// Start cloudflared if tunnel config was persisted from a previous run
+	if a.cfg.TunnelToken != "" {
+		if err := a.dockerMgr.EnsureCloudflared(ctx, a.cfg.TunnelToken); err != nil {
+			log.Printf("Warning: could not start cloudflared: %v", err)
+		}
 	}
 
 	// Start log and metrics collectors (survive reconnections)
@@ -152,6 +159,7 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 	handlers := grpcclient.CommandHandlers{
 		OnDeploy:           a.handler.HandleDeploy,
 		OnContainerCommand: a.handler.HandleContainerCommand,
+		OnTunnelConfig:     a.handler.HandleTunnelConfig,
 	}
 	go func() {
 		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)

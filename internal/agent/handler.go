@@ -17,14 +17,18 @@ type CommandHandler struct {
 	docker   *docker.Manager
 	builder  *build.Builder
 	deployer *deploy.Deployer
+	cfg      *Config
+	cfgDir   string
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
-func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer) *CommandHandler {
+func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string) *CommandHandler {
 	return &CommandHandler{
 		docker:   dm,
 		builder:  b,
 		deployer: d,
+		cfg:      cfg,
+		cfgDir:   cfgDir,
 	}
 }
 
@@ -178,5 +182,24 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 	}
 	if err := stream.Send(msg); err != nil {
 		log.Printf("Failed to send command result: %v", err)
+	}
+}
+
+// HandleTunnelConfig saves tunnel credentials and starts cloudflared.
+func (h *CommandHandler) HandleTunnelConfig(ctx context.Context, cfg *clankv1.TunnelConfig) {
+	token := cfg.GetTunnelToken()
+	tunnelID := cfg.GetTunnelId()
+	log.Printf("Configuring tunnel %s", tunnelID)
+
+	// Persist to agent config so cloudflared auto-starts on restart
+	h.cfg.TunnelToken = token
+	h.cfg.TunnelID = tunnelID
+	if err := SaveConfig(h.cfgDir, h.cfg); err != nil {
+		log.Printf("Warning: failed to save tunnel config: %v", err)
+	}
+
+	// Start or restart cloudflared
+	if err := h.docker.EnsureCloudflared(ctx, token); err != nil {
+		log.Printf("Error starting cloudflared: %v", err)
 	}
 }

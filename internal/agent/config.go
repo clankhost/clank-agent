@@ -16,6 +16,8 @@ type Config struct {
 	CertDir      string `yaml:"cert_dir"`
 	AuthMode     string `yaml:"auth_mode,omitempty"`  // "mtls" (default) or "token"
 	AuthToken    string `yaml:"auth_token,omitempty"` // JWT for tunnel mode
+	TunnelToken  string `yaml:"tunnel_token,omitempty"`
+	TunnelID     string `yaml:"tunnel_id,omitempty"`
 }
 
 // DefaultConfigDir returns the platform-appropriate config directory.

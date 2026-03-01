@@ -40,7 +40,7 @@ func runAgent(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	a, err := agentpkg.New(cfg, Version)
+	a, err := agentpkg.New(cfg, Version, configDir)
 	if err != nil {
 		return fmt.Errorf("initializing agent: %w", err)
 	}

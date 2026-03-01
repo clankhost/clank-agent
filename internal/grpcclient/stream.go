@@ -20,10 +20,14 @@ type DeployHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.
 // ContainerCommandHandler handles container lifecycle commands.
 type ContainerCommandHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.ContainerCommand)
 
+// TunnelConfigHandler handles tunnel configuration from the control plane.
+type TunnelConfigHandler func(ctx context.Context, cfg *clankv1.TunnelConfig)
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
 	OnDeploy           DeployHandler
 	OnContainerCommand ContainerCommandHandler
+	OnTunnelConfig     TunnelConfigHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -106,6 +110,19 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 						}
 					}()
 					handlers.OnContainerCommand(ctx, stream, p.ContainerCmd)
+				}()
+			}
+
+		case *clankv1.ControlMessage_TunnelConfig:
+			log.Printf("Received tunnel config (tunnel %s)", p.TunnelConfig.GetTunnelId())
+			if handlers.OnTunnelConfig != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in tunnel config handler: %v", r)
+						}
+					}()
+					handlers.OnTunnelConfig(ctx, p.TunnelConfig)
 				}()
 			}
 
