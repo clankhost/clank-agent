@@ -129,8 +129,8 @@ func (c *Collector) collect(ctx context.Context) {
 			continue
 		}
 
-		// CPU percentage (same formula as `docker stats`)
-		cpuPercent := calculateCPUPercent(parsed)
+		// CPU: cumulative usage in seconds (matches cAdvisor counter)
+		cpuSeconds := float64(parsed.CPUStats.CPUUsage.TotalUsage) / 1e9
 
 		// Memory: usage minus cache
 		memUsage := parsed.MemoryStats.Usage - parsed.MemoryStats.Stats.InactiveFile
@@ -146,11 +146,11 @@ func (c *Collector) collect(ctx context.Context) {
 		}
 
 		metrics = append(metrics,
-			&clankv1.Metric{Name: "container_cpu_percent", Value: cpuPercent, TimestampNs: now, Labels: labels},
+			&clankv1.Metric{Name: "container_cpu_usage_seconds_total", Value: cpuSeconds, TimestampNs: now, Labels: labels},
 			&clankv1.Metric{Name: "container_memory_usage_bytes", Value: float64(memUsage), TimestampNs: now, Labels: labels},
-			&clankv1.Metric{Name: "container_memory_limit_bytes", Value: float64(parsed.MemoryStats.Limit), TimestampNs: now, Labels: labels},
-			&clankv1.Metric{Name: "container_network_rx_bytes_total", Value: float64(rxBytes), TimestampNs: now, Labels: labels},
-			&clankv1.Metric{Name: "container_network_tx_bytes_total", Value: float64(txBytes), TimestampNs: now, Labels: labels},
+			&clankv1.Metric{Name: "container_spec_memory_limit_bytes", Value: float64(parsed.MemoryStats.Limit), TimestampNs: now, Labels: labels},
+			&clankv1.Metric{Name: "container_network_receive_bytes_total", Value: float64(rxBytes), TimestampNs: now, Labels: labels},
+			&clankv1.Metric{Name: "container_network_transmit_bytes_total", Value: float64(txBytes), TimestampNs: now, Labels: labels},
 		)
 	}
 
