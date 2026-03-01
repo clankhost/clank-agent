@@ -146,12 +146,25 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 		ExposedPorts: nat.PortSet{exposedPort: struct{}{}},
 	}
 
+	// Security: drop ALL, then add back the Docker-default capabilities minus
+	// the truly dangerous ones (NET_RAW, SYS_CHROOT, AUDIT_WRITE, SETPCAP,
+	// SETFCAP, MKNOD).  This lets most images (wordpress, postgres, etc.)
+	// work while still being significantly more restrictive than defaults.
 	hostConfig := &container.HostConfig{
 		Resources:     resources,
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		CapDrop:       []string{"ALL"},
-		CapAdd:        []string{"CHOWN", "SETUID", "SETGID"},
-		SecurityOpt:   []string{"no-new-privileges"},
+		CapAdd: []string{
+			"CHOWN",
+			"DAC_OVERRIDE",
+			"FOWNER",
+			"FSETID",
+			"KILL",
+			"SETGID",
+			"SETUID",
+			"NET_BIND_SERVICE",
+		},
+		SecurityOpt: []string{"no-new-privileges"},
 	}
 
 	networkConfig := &network.NetworkingConfig{}
