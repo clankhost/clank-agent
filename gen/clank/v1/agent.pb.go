@@ -1041,7 +1041,10 @@ type UpdateCommand struct {
 	// Full download URL for the checksums file.
 	ChecksumUrl string `protobuf:"bytes,3,opt,name=checksum_url,json=checksumUrl,proto3" json:"checksum_url,omitempty"`
 	// Expected SHA-256 hash of the archive (hex-encoded).
-	Sha256        string `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	Sha256 string `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	// ECDSA P-256 signature over the archive SHA-256 hash (hex-encoded DER).
+	// Verified against the public key embedded in the agent binary.
+	Signature     string `protobuf:"bytes,5,opt,name=signature,proto3" json:"signature,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1100,6 +1103,13 @@ func (x *UpdateCommand) GetChecksumUrl() string {
 func (x *UpdateCommand) GetSha256() string {
 	if x != nil {
 		return x.Sha256
+	}
+	return ""
+}
+
+func (x *UpdateCommand) GetSignature() string {
+	if x != nil {
+		return x.Signature
 	}
 	return ""
 }
@@ -2314,12 +2324,13 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rtunnel_config\x18\x06 \x01(\v2\x16.clank.v1.TunnelConfigH\x00R\ftunnelConfig\x121\n" +
 	"\x06update\x18\a \x01(\v2\x17.clank.v1.UpdateCommandH\x00R\x06update\x12>\n" +
 	"\fendpoint_cmd\x18\b \x01(\v2\x19.clank.v1.EndpointCommandH\x00R\vendpointCmdB\t\n" +
-	"\apayload\"\x87\x01\n" +
+	"\apayload\"\xa5\x01\n" +
 	"\rUpdateCommand\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12!\n" +
 	"\fdownload_url\x18\x02 \x01(\tR\vdownloadUrl\x12!\n" +
 	"\fchecksum_url\x18\x03 \x01(\tR\vchecksumUrl\x12\x16\n" +
-	"\x06sha256\x18\x04 \x01(\tR\x06sha256\"N\n" +
+	"\x06sha256\x18\x04 \x01(\tR\x06sha256\x12\x1c\n" +
+	"\tsignature\x18\x05 \x01(\tR\tsignature\"N\n" +
 	"\fTunnelConfig\x12!\n" +
 	"\ftunnel_token\x18\x01 \x01(\tR\vtunnelToken\x12\x1b\n" +
 	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xe0\x05\n" +
