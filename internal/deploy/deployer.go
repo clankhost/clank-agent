@@ -184,6 +184,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		}
 	}
 
+	// Stop the failed container so Traefik doesn't route traffic to it (CRITICAL-1 fix).
+	log.Printf("Stopping failed container %s after health check failure", containerName)
+	if stopErr := d.docker.StopAndRemove(ctx, containerID); stopErr != nil {
+		log.Printf("Warning: failed to remove unhealthy container: %v", stopErr)
+	}
+
 	return fmt.Errorf("health checks failed after %d attempts", hc.Retries)
 }
 
