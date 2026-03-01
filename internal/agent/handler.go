@@ -4,31 +4,35 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
 	"github.com/anaremore/clank/apps/agent/internal/build"
 	"github.com/anaremore/clank/apps/agent/internal/deploy"
 	"github.com/anaremore/clank/apps/agent/internal/docker"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
+	"github.com/anaremore/clank/apps/agent/internal/selfupdate"
 )
 
 // CommandHandler processes commands received from the control plane.
 type CommandHandler struct {
-	docker   *docker.Manager
-	builder  *build.Builder
-	deployer *deploy.Deployer
-	cfg      *Config
-	cfgDir   string
+	docker         *docker.Manager
+	builder        *build.Builder
+	deployer       *deploy.Deployer
+	cfg            *Config
+	cfgDir         string
+	currentVersion string
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
-func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string) *CommandHandler {
+func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string, version string) *CommandHandler {
 	return &CommandHandler{
-		docker:   dm,
-		builder:  b,
-		deployer: d,
-		cfg:      cfg,
-		cfgDir:   cfgDir,
+		docker:         dm,
+		builder:        b,
+		deployer:       d,
+		cfg:            cfg,
+		cfgDir:         cfgDir,
+		currentVersion: version,
 	}
 }
 
@@ -183,6 +187,25 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 	if err := stream.Send(msg); err != nil {
 		log.Printf("Failed to send command result: %v", err)
 	}
+}
+
+// HandleUpdate downloads a new agent binary, replaces the current one,
+// and exits so systemd can restart with the new version.
+func (h *CommandHandler) HandleUpdate(ctx context.Context, cmd *clankv1.UpdateCommand) {
+	log.Printf("Self-update: %s → %s", h.currentVersion, cmd.GetVersion())
+
+	if err := selfupdate.Apply(
+		cmd.GetDownloadUrl(),
+		cmd.GetSha256(),
+		h.currentVersion,
+		cmd.GetVersion(),
+	); err != nil {
+		log.Printf("Self-update failed: %v", err)
+		return
+	}
+
+	log.Printf("Self-update to %s complete, exiting for restart...", cmd.GetVersion())
+	os.Exit(0)
 }
 
 // HandleTunnelConfig saves tunnel credentials and starts cloudflared.

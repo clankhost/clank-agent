@@ -23,11 +23,15 @@ type ContainerCommandHandler func(ctx context.Context, stream ConnectStream, cmd
 // TunnelConfigHandler handles tunnel configuration from the control plane.
 type TunnelConfigHandler func(ctx context.Context, cfg *clankv1.TunnelConfig)
 
+// UpdateHandler handles self-update commands from the control plane.
+type UpdateHandler func(ctx context.Context, cmd *clankv1.UpdateCommand)
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
 	OnDeploy           DeployHandler
 	OnContainerCommand ContainerCommandHandler
 	OnTunnelConfig     TunnelConfigHandler
+	OnUpdate           UpdateHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -123,6 +127,19 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 						}
 					}()
 					handlers.OnTunnelConfig(ctx, p.TunnelConfig)
+				}()
+			}
+
+		case *clankv1.ControlMessage_Update:
+			log.Printf("Received update command: version %s", p.Update.GetVersion())
+			if handlers.OnUpdate != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in update handler: %v", r)
+						}
+					}()
+					handlers.OnUpdate(ctx, p.Update)
 				}()
 			}
 

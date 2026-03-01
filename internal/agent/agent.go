@@ -54,7 +54,7 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 
 	b := build.NewBuilder(dockerMgr)
 	d := deploy.NewDeployer(dockerMgr)
-	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgDir)
+	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgDir, agentVersion)
 	lc := logs.NewCollector(dockerMgr)
 	mc := metrics.NewCollector(dockerMgr, cfg.ServerID)
 
@@ -160,6 +160,7 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 		OnDeploy:           a.handler.HandleDeploy,
 		OnContainerCommand: a.handler.HandleContainerCommand,
 		OnTunnelConfig:     a.handler.HandleTunnelConfig,
+		OnUpdate:           a.handler.HandleUpdate,
 	}
 	go func() {
 		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)
