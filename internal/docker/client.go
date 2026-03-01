@@ -150,6 +150,7 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 		Resources:     resources,
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
 		CapDrop:       []string{"ALL"},
+		CapAdd:        []string{"CHOWN", "SETUID", "SETGID"},
 		SecurityOpt:   []string{"no-new-privileges"},
 	}
 
