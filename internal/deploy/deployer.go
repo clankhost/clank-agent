@@ -39,6 +39,7 @@ type DeployOpts struct {
 	HealthConfig    HealthConfig
 	CPULimit        float64
 	MemoryLimitMB   int
+	ProjectNetwork  string
 }
 
 // HealthConfig mirrors the proto HealthCheckConfig.
@@ -104,6 +105,18 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	log.Printf("Container %s started (%s)", containerName, containerID[:12])
+
+	// Connect to per-project network for inter-service DNS discovery (e.g., n8n → n8n-db)
+	if opts.ProjectNetwork != "" {
+		if err := d.docker.EnsureNetwork(ctx, opts.ProjectNetwork); err != nil {
+			log.Printf("Warning: failed to ensure project network %s: %v", opts.ProjectNetwork, err)
+		} else if err := d.docker.ConnectToNetwork(ctx, containerID, opts.ProjectNetwork, []string{opts.ServiceSlug}); err != nil {
+			log.Printf("Warning: failed to connect to project network %s: %v", opts.ProjectNetwork, err)
+		} else {
+			log.Printf("Connected %s to project network %s (alias: %s)", containerName, opts.ProjectNetwork, opts.ServiceSlug)
+		}
+	}
+
 	onProgress("health_checking", "Container started, running health checks...", containerID[:12], containerName)
 
 	// Health checks

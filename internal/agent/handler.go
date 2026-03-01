@@ -119,6 +119,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		HealthConfig:    healthConfig,
 		CPULimit:        cpuLimit,
 		MemoryLimitMB:   memoryLimitMB,
+		ProjectNetwork:  cmd.GetProjectNetwork(),
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)
 	})
