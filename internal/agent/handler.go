@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
 	"github.com/anaremore/clank/apps/agent/internal/build"
@@ -215,22 +216,92 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 }
 
 // HandleUpdate downloads a new agent binary, replaces the current one,
-// and exits so systemd can restart with the new version.
-func (h *CommandHandler) HandleUpdate(ctx context.Context, cmd *clankv1.UpdateCommand) {
-	log.Printf("Self-update: %s → %s", h.currentVersion, cmd.GetVersion())
+// sends an ACK to the control plane, and exits so systemd can restart
+// with the new version. On transient download failures, retries up to 3 times.
+func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.UpdateCommand) {
+	newVersion := cmd.GetVersion()
+	log.Printf("Self-update: %s → %s", h.currentVersion, newVersion)
 
-	if err := selfupdate.Apply(
-		cmd.GetDownloadUrl(),
-		cmd.GetSha256(),
-		h.currentVersion,
-		cmd.GetVersion(),
-	); err != nil {
-		log.Printf("Self-update failed: %v", err)
+	// Write state file before attempting update (for crash recovery)
+	selfupdate.SaveState(h.cfgDir, &selfupdate.UpdateState{
+		Status:      "pending",
+		FromVersion: h.currentVersion,
+		ToVersion:   newVersion,
+		Attempts:    0,
+	})
+
+	// Retry loop with backoff for transient failures
+	backoffs := []time.Duration{10 * time.Second, 30 * time.Second, 60 * time.Second}
+	var lastErr error
+
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		if attempt > 0 {
+			wait := backoffs[attempt-1]
+			log.Printf("[update] Retry %d/%d in %s...", attempt, len(backoffs), wait)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+
+		lastErr = selfupdate.BackupAndApply(
+			cmd.GetDownloadUrl(),
+			cmd.GetSha256(),
+			h.currentVersion,
+			newVersion,
+		)
+
+		if lastErr == nil {
+			break
+		}
+
+		log.Printf("[update] Attempt %d failed: %v", attempt+1, lastErr)
+
+		// Only retry on transient (download) errors
+		if !selfupdate.IsRetryable(lastErr) {
+			break
+		}
+	}
+
+	if lastErr != nil {
+		// Send failure ACK
+		log.Printf("Self-update failed: %v", lastErr)
+		selfupdate.ClearState(h.cfgDir)
+		h.sendUpdateResult(stream, newVersion, false, lastErr)
 		return
 	}
 
-	log.Printf("Self-update to %s complete, exiting for restart...", cmd.GetVersion())
+	// Send success ACK
+	h.sendUpdateResult(stream, newVersion, true, nil)
+
+	// Brief sleep to let the ACK flush on the wire
+	time.Sleep(500 * time.Millisecond)
+
+	log.Printf("Self-update to %s complete, exiting for restart...", newVersion)
 	os.Exit(0)
+}
+
+// sendUpdateResult sends an UpdateResult message back to the control plane.
+func (h *CommandHandler) sendUpdateResult(stream grpcclient.ConnectStream, toVersion string, success bool, err error) {
+	result := &clankv1.UpdateResult{
+		FromVersion: h.currentVersion,
+		ToVersion:   toVersion,
+		Success:     success,
+	}
+	if err != nil {
+		result.ErrorMessage = err.Error()
+		result.FailedPhase = selfupdate.ErrorPhase(err)
+	}
+
+	msg := &clankv1.AgentMessage{
+		Payload: &clankv1.AgentMessage_UpdateResult{
+			UpdateResult: result,
+		},
+	}
+	if sendErr := stream.Send(msg); sendErr != nil {
+		log.Printf("Failed to send update result: %v", sendErr)
+	}
 }
 
 // HandleEndpoint processes an EndpointCommand (ensure/disable/doctor).

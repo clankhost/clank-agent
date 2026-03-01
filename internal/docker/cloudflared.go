@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 )
@@ -31,6 +32,10 @@ func (m *Manager) EnsureCloudflared(ctx context.Context, tunnelToken string) err
 			log.Printf("Warning: failed to remove old cloudflared: %v", err)
 		}
 	}
+	// Also force-remove by name in case an orphan container exists without
+	// the expected label (e.g. from a previous crash or manual creation).
+	_ = m.cli.ContainerRemove(ctx, cloudflaredContainerName, container.RemoveOptions{Force: true})
+	time.Sleep(1 * time.Second)
 
 	log.Println("Starting cloudflared...")
 
@@ -86,6 +91,9 @@ func (m *Manager) EnsureCloudflaredNamed(ctx context.Context, name, tunnelToken 
 		log.Printf("Cloudflared %s already running", name)
 		return nil
 	}
+	// Force-remove any orphan container with this name but without the label
+	_ = m.cli.ContainerRemove(ctx, name, container.RemoveOptions{Force: true})
+	time.Sleep(500 * time.Millisecond)
 
 	log.Printf("Starting cloudflared %s...", name)
 

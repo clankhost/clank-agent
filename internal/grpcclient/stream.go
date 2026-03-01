@@ -24,7 +24,7 @@ type ContainerCommandHandler func(ctx context.Context, stream ConnectStream, cmd
 type TunnelConfigHandler func(ctx context.Context, cfg *clankv1.TunnelConfig)
 
 // UpdateHandler handles self-update commands from the control plane.
-type UpdateHandler func(ctx context.Context, cmd *clankv1.UpdateCommand)
+type UpdateHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.UpdateCommand)
 
 // EndpointHandler handles endpoint management commands.
 type EndpointHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.EndpointCommand)
@@ -143,7 +143,7 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 							log.Printf("PANIC in update handler: %v", r)
 						}
 					}()
-					handlers.OnUpdate(ctx, p.Update)
+					handlers.OnUpdate(ctx, stream, p.Update)
 				}()
 			}
 

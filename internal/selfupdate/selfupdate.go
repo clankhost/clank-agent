@@ -16,6 +16,35 @@ import (
 	"time"
 )
 
+// PhaseError wraps an error with the update phase where it occurred.
+type PhaseError struct {
+	Phase string // "download", "checksum", "extract", "replace", "backup"
+	Err   error
+}
+
+func (e *PhaseError) Error() string {
+	return fmt.Sprintf("%s: %v", e.Phase, e.Err)
+}
+
+func (e *PhaseError) Unwrap() error {
+	return e.Err
+}
+
+// ErrorPhase extracts the phase from a PhaseError, or returns "" if not a PhaseError.
+func ErrorPhase(err error) string {
+	if pe, ok := err.(*PhaseError); ok {
+		return pe.Phase
+	}
+	return ""
+}
+
+// IsRetryable returns true if the error occurred in a phase where retrying
+// may succeed (e.g., transient download failures).
+func IsRetryable(err error) bool {
+	phase := ErrorPhase(err)
+	return phase == "download"
+}
+
 // Apply downloads the new agent binary, verifies its checksum, and replaces
 // the current binary atomically. Returns nil on success — the caller should
 // exit to let systemd restart with the new binary.
@@ -30,34 +59,34 @@ func Apply(downloadURL, expectedSHA256, currentVersion, newVersion string) error
 	// 1. Determine current binary path
 	execPath, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("resolving executable path: %w", err)
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("resolving executable path: %w", err)}
 	}
 	execPath, err = filepath.EvalSymlinks(execPath)
 	if err != nil {
-		return fmt.Errorf("resolving symlinks: %w", err)
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("resolving symlinks: %w", err)}
 	}
 
 	// 2. Download archive to temp dir
 	log.Printf("[update] Downloading %s", downloadURL)
 	tmpDir, err := os.MkdirTemp("", "clank-update-*")
 	if err != nil {
-		return fmt.Errorf("creating temp dir: %w", err)
+		return &PhaseError{Phase: "download", Err: fmt.Errorf("creating temp dir: %w", err)}
 	}
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, "archive.tar.gz")
 	if err := downloadFile(downloadURL, archivePath); err != nil {
-		return fmt.Errorf("downloading archive: %w", err)
+		return &PhaseError{Phase: "download", Err: fmt.Errorf("downloading archive: %w", err)}
 	}
 
 	// 3. Verify SHA-256 checksum
 	if expectedSHA256 != "" {
 		actual, err := fileSHA256(archivePath)
 		if err != nil {
-			return fmt.Errorf("computing checksum: %w", err)
+			return &PhaseError{Phase: "checksum", Err: fmt.Errorf("computing checksum: %w", err)}
 		}
 		if !strings.EqualFold(actual, expectedSHA256) {
-			return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedSHA256, actual)
+			return &PhaseError{Phase: "checksum", Err: fmt.Errorf("checksum mismatch: expected %s, got %s", expectedSHA256, actual)}
 		}
 		log.Printf("[update] Checksum verified")
 	} else {
@@ -67,12 +96,12 @@ func Apply(downloadURL, expectedSHA256, currentVersion, newVersion string) error
 	// 4. Extract binary from tar.gz
 	newBinaryPath := filepath.Join(tmpDir, "clank-agent")
 	if err := extractBinary(archivePath, newBinaryPath); err != nil {
-		return fmt.Errorf("extracting binary: %w", err)
+		return &PhaseError{Phase: "extract", Err: fmt.Errorf("extracting binary: %w", err)}
 	}
 
 	// 5. Make executable
 	if err := os.Chmod(newBinaryPath, 0755); err != nil {
-		return fmt.Errorf("setting permissions: %w", err)
+		return &PhaseError{Phase: "extract", Err: fmt.Errorf("setting permissions: %w", err)}
 	}
 
 	// 6. Atomic replace: stage next to the target (same filesystem) then rename.
@@ -81,19 +110,96 @@ func Apply(downloadURL, expectedSHA256, currentVersion, newVersion string) error
 	// requires source and dest on the same filesystem.
 	stagePath := execPath + ".new"
 	if err := copyFile(newBinaryPath, stagePath); err != nil {
-		return fmt.Errorf("staging binary: %w", err)
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("staging binary: %w", err)}
 	}
 	if err := os.Chmod(stagePath, 0755); err != nil {
 		os.Remove(stagePath)
-		return fmt.Errorf("setting stage permissions: %w", err)
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("setting stage permissions: %w", err)}
 	}
 	if err := os.Rename(stagePath, execPath); err != nil {
 		os.Remove(stagePath)
-		return fmt.Errorf("replacing binary: %w", err)
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("replacing binary: %w", err)}
 	}
 
 	log.Printf("[update] Binary replaced at %s", execPath)
 	return nil
+}
+
+// BackupAndApply creates a backup of the current binary before applying
+// the update. If Apply fails, the backup is automatically restored.
+func BackupAndApply(downloadURL, expectedSHA256, currentVersion, newVersion string) error {
+	if currentVersion == newVersion {
+		log.Printf("[update] Already running version %s, skipping", currentVersion)
+		return nil
+	}
+
+	execPath, err := os.Executable()
+	if err != nil {
+		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving executable path: %w", err)}
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving symlinks: %w", err)}
+	}
+
+	// Create backup
+	backupPath := execPath + ".prev"
+	log.Printf("[update] Backing up current binary to %s", backupPath)
+	if err := copyFile(execPath, backupPath); err != nil {
+		return &PhaseError{Phase: "backup", Err: fmt.Errorf("creating backup: %w", err)}
+	}
+	if err := os.Chmod(backupPath, 0755); err != nil {
+		os.Remove(backupPath)
+		return &PhaseError{Phase: "backup", Err: fmt.Errorf("setting backup permissions: %w", err)}
+	}
+
+	// Apply the update
+	if err := Apply(downloadURL, expectedSHA256, currentVersion, newVersion); err != nil {
+		// Restore backup on failure
+		log.Printf("[update] Apply failed, restoring backup: %v", err)
+		if restoreErr := os.Rename(backupPath, execPath); restoreErr != nil {
+			log.Printf("[update] WARNING: failed to restore backup: %v", restoreErr)
+		}
+		return err
+	}
+
+	return nil
+}
+
+// Rollback restores the previous binary from the .prev backup.
+// Returns an error if no backup exists.
+func Rollback() error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return fmt.Errorf("resolving symlinks: %w", err)
+	}
+
+	backupPath := execPath + ".prev"
+	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
+		return fmt.Errorf("no backup found at %s", backupPath)
+	}
+
+	log.Printf("[update] Rolling back to previous binary from %s", backupPath)
+	if err := os.Rename(backupPath, execPath); err != nil {
+		return fmt.Errorf("restoring backup: %w", err)
+	}
+
+	log.Printf("[update] Rollback complete")
+	return nil
+}
+
+// CleanupBackup removes the .prev backup after a successful update.
+func CleanupBackup() {
+	execPath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	execPath, _ = filepath.EvalSymlinks(execPath)
+	os.Remove(execPath + ".prev")
 }
 
 func downloadFile(url, dest string) error {

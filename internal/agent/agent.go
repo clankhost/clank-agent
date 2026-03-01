@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/anaremore/clank/apps/agent/internal/build"
@@ -13,6 +14,7 @@ import (
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
 	"github.com/anaremore/clank/apps/agent/internal/logs"
 	"github.com/anaremore/clank/apps/agent/internal/metrics"
+	"github.com/anaremore/clank/apps/agent/internal/selfupdate"
 	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
 	"google.golang.org/grpc"
 )
@@ -28,6 +30,7 @@ const streamReconnectWait = 5 * time.Second
 // Agent manages the lifecycle of the gRPC connection and heartbeat loop.
 type Agent struct {
 	cfg          *Config
+	cfgDir       string
 	agentVersion string
 	certStore    *certs.Store
 	dockerMgr    *docker.Manager
@@ -60,6 +63,7 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 
 	return &Agent{
 		cfg:          cfg,
+		cfgDir:       cfgDir,
 		agentVersion: agentVersion,
 		certStore:    store,
 		dockerMgr:    dockerMgr,
@@ -75,6 +79,10 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 // It reconnects on errors with exponential backoff.
 // Returns when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	// Post-update self-check: verify the new binary can connect.
+	// If this fails repeatedly, roll back to the previous binary.
+	a.checkPendingUpdate(ctx)
+
 	// Ensure Traefik is running on this host
 	if err := a.dockerMgr.EnsureTraefik(ctx); err != nil {
 		log.Printf("Warning: could not ensure Traefik is running: %v", err)
@@ -237,6 +245,84 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 			log.Println("Heartbeat sent")
 		}
 	}
+}
+
+// checkPendingUpdate handles post-update verification after a binary replacement.
+// If an update-state.json file exists with status "pending", the agent verifies
+// connectivity to the control plane. After 3 failed attempts, it rolls back
+// to the previous binary and exits (systemd restarts with the old version).
+func (a *Agent) checkPendingUpdate(ctx context.Context) {
+	state := selfupdate.LoadState(a.cfgDir)
+	if state == nil || state.Status != "pending" {
+		return
+	}
+
+	state.Attempts++
+	log.Printf("[update] Post-update check (attempt %d/3): verifying connectivity...", state.Attempts)
+
+	if state.Attempts > 3 {
+		log.Printf("[update] Too many failed startup attempts — rolling back")
+		if err := selfupdate.Rollback(); err != nil {
+			log.Printf("[update] Rollback failed: %v", err)
+		}
+		selfupdate.ClearState(a.cfgDir)
+		log.Printf("[update] Exiting for systemd restart with previous binary")
+		os.Exit(1)
+	}
+
+	// Save incremented attempt count before connectivity test
+	selfupdate.SaveState(a.cfgDir, state)
+
+	// Verify we can reach the control plane
+	if a.verifyConnectivity(ctx) {
+		log.Printf("[update] Connectivity verified — update from %s to %s confirmed", state.FromVersion, state.ToVersion)
+		selfupdate.ClearState(a.cfgDir)
+		selfupdate.CleanupBackup()
+	} else {
+		log.Printf("[update] Connectivity check failed (attempt %d/3)", state.Attempts)
+		// Don't rollback yet — let next restart increment attempts
+	}
+}
+
+// verifyConnectivity attempts to dial the gRPC endpoint and open a stream
+// within a 30-second timeout. Returns true if successful.
+func (a *Agent) verifyConnectivity(ctx context.Context) bool {
+	verifyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	var conn *grpc.ClientConn
+	var err error
+
+	if a.cfg.AuthMode == "token" {
+		conn, err = grpcclient.DialTunnelWithAuth(a.cfg.GRPCEndpoint, a.cfg.AuthToken)
+	} else {
+		tlsCreds, credErr := a.certStore.TransportCredentials()
+		if credErr != nil {
+			log.Printf("[update] Failed to load TLS credentials: %v", credErr)
+			return false
+		}
+		conn, err = grpcclient.Dial(a.cfg.GRPCEndpoint, tlsCreds)
+	}
+	if err != nil {
+		log.Printf("[update] Failed to dial control plane: %v", err)
+		return false
+	}
+	defer conn.Close()
+
+	stream, err := grpcclient.OpenConnectStream(verifyCtx, conn)
+	if err != nil {
+		log.Printf("[update] Failed to open stream: %v", err)
+		return false
+	}
+
+	// Send a single heartbeat to confirm the stream works
+	info, containers := a.collectInfo()
+	if err := grpcclient.SendHeartbeat(stream, info, containers); err != nil {
+		log.Printf("[update] Failed to send heartbeat: %v", err)
+		return false
+	}
+
+	return true
 }
 
 func (a *Agent) collectInfo() (*sysinfo.Info, []sysinfo.ContainerStatus) {
