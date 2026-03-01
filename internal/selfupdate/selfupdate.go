@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -45,6 +46,35 @@ func IsRetryable(err error) bool {
 	return phase == "download"
 }
 
+// parseSemver splits a "X.Y.Z" version string into (major, minor, patch).
+// Returns (0,0,0) if parsing fails. Strips a leading "v" if present.
+func parseSemver(v string) (int, int, int) {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) != 3 {
+		return 0, 0, 0
+	}
+	major, _ := strconv.Atoi(parts[0])
+	minor, _ := strconv.Atoi(parts[1])
+	// Strip anything after a hyphen (e.g., "1.2.3-rc1" → "3")
+	patchStr := strings.SplitN(parts[2], "-", 2)[0]
+	patch, _ := strconv.Atoi(patchStr)
+	return major, minor, patch
+}
+
+// isDowngrade returns true if newVersion is strictly less than currentVersion.
+func isDowngrade(currentVersion, newVersion string) bool {
+	cMaj, cMin, cPatch := parseSemver(currentVersion)
+	nMaj, nMin, nPatch := parseSemver(newVersion)
+	if nMaj != cMaj {
+		return nMaj < cMaj
+	}
+	if nMin != cMin {
+		return nMin < cMin
+	}
+	return nPatch < cPatch
+}
+
 // Apply downloads the new agent binary, verifies its signature and checksum,
 // and replaces the current binary atomically. Returns nil on success — the
 // caller should exit to let systemd restart with the new binary.
@@ -57,6 +87,16 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
+	}
+
+	// Reject downgrades — defense-in-depth against compromised control plane
+	// or accidental VERSION file rollback.
+	if isDowngrade(currentVersion, newVersion) {
+		log.Printf("[update] Rejecting downgrade from %s to %s", currentVersion, newVersion)
+		return &PhaseError{
+			Phase: "version",
+			Err:   fmt.Errorf("downgrade rejected: %s → %s (current > requested)", currentVersion, newVersion),
+		}
 	}
 
 	log.Printf("[update] Updating from %s to %s", currentVersion, newVersion)
@@ -156,6 +196,15 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
+	}
+
+	// Reject downgrades before even creating a backup
+	if isDowngrade(currentVersion, newVersion) {
+		log.Printf("[update] Rejecting downgrade from %s to %s", currentVersion, newVersion)
+		return &PhaseError{
+			Phase: "version",
+			Err:   fmt.Errorf("downgrade rejected: %s → %s (current > requested)", currentVersion, newVersion),
+		}
 	}
 
 	execPath, err := os.Executable()
