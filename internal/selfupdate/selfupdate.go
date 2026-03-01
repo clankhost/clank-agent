@@ -150,9 +150,10 @@ func extractBinary(archivePath, destPath string) error {
 		if err != nil {
 			return err
 		}
-		// Look for the clank-agent binary (may be at root or in a subdirectory)
+		// Look for the clank-agent binary (may be at root or in a subdirectory,
+		// and may have a platform suffix like clank-agent-linux-amd64)
 		name := filepath.Base(hdr.Name)
-		if name == "clank-agent" && hdr.Typeflag == tar.TypeReg {
+		if strings.HasPrefix(name, "clank-agent") && hdr.Typeflag == tar.TypeReg {
 			out, err := os.Create(destPath)
 			if err != nil {
 				return err
