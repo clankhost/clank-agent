@@ -18,7 +18,7 @@ import (
 
 // PhaseError wraps an error with the update phase where it occurred.
 type PhaseError struct {
-	Phase string // "download", "checksum", "extract", "replace", "backup"
+	Phase string // "download", "checksum", "signature", "extract", "replace", "backup"
 	Err   error
 }
 
@@ -45,10 +45,15 @@ func IsRetryable(err error) bool {
 	return phase == "download"
 }
 
-// Apply downloads the new agent binary, verifies its checksum, and replaces
-// the current binary atomically. Returns nil on success — the caller should
-// exit to let systemd restart with the new binary.
-func Apply(downloadURL, expectedSHA256, currentVersion, newVersion string) error {
+// Apply downloads the new agent binary, verifies its signature and checksum,
+// and replaces the current binary atomically. Returns nil on success — the
+// caller should exit to let systemd restart with the new binary.
+//
+// If signature is non-empty and a signing public key is embedded, the archive's
+// ECDSA P-256 signature is verified before proceeding. This prevents supply-chain
+// attacks where a compromised control plane serves a malicious binary with
+// a matching checksum.
+func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -93,6 +98,26 @@ func Apply(downloadURL, expectedSHA256, currentVersion, newVersion string) error
 		log.Printf("[update] WARNING: no checksum provided, skipping verification")
 	}
 
+	// 3b. Verify ECDSA signature (supply-chain protection)
+	if signature != "" && len(SigningPublicKey) > 0 {
+		// Compute the hash of the archive for signature verification
+		archiveHash, err := fileSHA256(archivePath)
+		if err != nil {
+			return &PhaseError{Phase: "signature", Err: fmt.Errorf("computing hash for signature: %w", err)}
+		}
+		if err := VerifySignature(archiveHash, signature, SigningPublicKey); err != nil {
+			return &PhaseError{Phase: "signature", Err: err}
+		}
+		log.Printf("[update] Signature verified (key=%s)", signingKeyFingerprint(SigningPublicKey))
+	} else if signature == "" && len(SigningPublicKey) > 0 {
+		// Public key is embedded but server didn't send a signature.
+		// This means the binary wasn't signed during build — reject the update.
+		log.Printf("[update] WARNING: no signature provided but signing key is embedded — rejecting unsigned update")
+		return &PhaseError{Phase: "signature", Err: fmt.Errorf("unsigned update rejected — signing key is embedded but no signature was provided")}
+	} else {
+		log.Printf("[update] WARNING: no signing key embedded, skipping signature verification")
+	}
+
 	// 4. Extract binary from tar.gz
 	newBinaryPath := filepath.Join(tmpDir, "clank-agent")
 	if err := extractBinary(archivePath, newBinaryPath); err != nil {
@@ -127,7 +152,7 @@ func Apply(downloadURL, expectedSHA256, currentVersion, newVersion string) error
 
 // BackupAndApply creates a backup of the current binary before applying
 // the update. If Apply fails, the backup is automatically restored.
-func BackupAndApply(downloadURL, expectedSHA256, currentVersion, newVersion string) error {
+func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -154,7 +179,7 @@ func BackupAndApply(downloadURL, expectedSHA256, currentVersion, newVersion stri
 	}
 
 	// Apply the update
-	if err := Apply(downloadURL, expectedSHA256, currentVersion, newVersion); err != nil {
+	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion); err != nil {
 		// Restore backup on failure
 		log.Printf("[update] Apply failed, restoring backup: %v", err)
 		if restoreErr := os.Rename(backupPath, execPath); restoreErr != nil {

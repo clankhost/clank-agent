@@ -248,6 +248,7 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 		lastErr = selfupdate.BackupAndApply(
 			cmd.GetDownloadUrl(),
 			cmd.GetSha256(),
+			cmd.GetSignature(),
 			h.currentVersion,
 			newVersion,
 		)
