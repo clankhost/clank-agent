@@ -27,6 +27,8 @@ const (
 	ContainerCommand_STOP    ContainerCommand_Action = 0
 	ContainerCommand_START   ContainerCommand_Action = 1
 	ContainerCommand_RESTART ContainerCommand_Action = 2
+	// Stop + remove all containers for a service, plus remove build images.
+	ContainerCommand_REMOVE ContainerCommand_Action = 3
 )
 
 // Enum value maps for ContainerCommand_Action.
@@ -35,11 +37,13 @@ var (
 		0: "STOP",
 		1: "START",
 		2: "RESTART",
+		3: "REMOVE",
 	}
 	ContainerCommand_Action_value = map[string]int32{
 		"STOP":    0,
 		"START":   1,
 		"RESTART": 2,
+		"REMOVE":  3,
 	}
 )
 
@@ -1505,13 +1509,15 @@ func (x *ResourceConfig) GetMemoryLimitMb() int32 {
 	return 0
 }
 
-// Container lifecycle commands (stop, start, restart).
+// Container lifecycle commands (stop, start, restart, remove).
 type ContainerCommand struct {
 	state         protoimpl.MessageState  `protogen:"open.v1"`
 	CommandId     string                  `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
 	DeploymentId  string                  `protobuf:"bytes,2,opt,name=deployment_id,json=deploymentId,proto3" json:"deployment_id,omitempty"`
 	ContainerName string                  `protobuf:"bytes,3,opt,name=container_name,json=containerName,proto3" json:"container_name,omitempty"`
 	Action        ContainerCommand_Action `protobuf:"varint,4,opt,name=action,proto3,enum=clank.v1.ContainerCommand_Action" json:"action,omitempty"`
+	// For REMOVE: find all containers by service slug label instead of single name.
+	ServiceSlug   string `protobuf:"bytes,5,opt,name=service_slug,json=serviceSlug,proto3" json:"service_slug,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1572,6 +1578,13 @@ func (x *ContainerCommand) GetAction() ContainerCommand_Action {
 		return x.Action
 	}
 	return ContainerCommand_STOP
+}
+
+func (x *ContainerCommand) GetServiceSlug() string {
+	if x != nil {
+		return x.ServiceSlug
+	}
+	return ""
 }
 
 // Delivers secrets to the agent for a deployment.
@@ -2392,17 +2405,20 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x15startup_grace_seconds\x18\x05 \x01(\x05R\x13startupGraceSeconds\"U\n" +
 	"\x0eResourceConfig\x12\x1b\n" +
 	"\tcpu_limit\x18\x01 \x01(\x01R\bcpuLimit\x12&\n" +
-	"\x0fmemory_limit_mb\x18\x02 \x01(\x05R\rmemoryLimitMb\"\xe4\x01\n" +
+	"\x0fmemory_limit_mb\x18\x02 \x01(\x05R\rmemoryLimitMb\"\x93\x02\n" +
 	"\x10ContainerCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12#\n" +
 	"\rdeployment_id\x18\x02 \x01(\tR\fdeploymentId\x12%\n" +
 	"\x0econtainer_name\x18\x03 \x01(\tR\rcontainerName\x129\n" +
-	"\x06action\x18\x04 \x01(\x0e2!.clank.v1.ContainerCommand.ActionR\x06action\"*\n" +
+	"\x06action\x18\x04 \x01(\x0e2!.clank.v1.ContainerCommand.ActionR\x06action\x12!\n" +
+	"\fservice_slug\x18\x05 \x01(\tR\vserviceSlug\"6\n" +
 	"\x06Action\x12\b\n" +
 	"\x04STOP\x10\x00\x12\t\n" +
 	"\x05START\x10\x01\x12\v\n" +
-	"\aRESTART\x10\x02\"\xb3\x01\n" +
+	"\aRESTART\x10\x02\x12\n" +
+	"\n" +
+	"\x06REMOVE\x10\x03\"\xb3\x01\n" +
 	"\x0eSecretDelivery\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12@\n" +
 	"\benv_vars\x18\x02 \x03(\v2%.clank.v1.SecretDelivery.EnvVarsEntryR\aenvVars\x1a:\n" +
