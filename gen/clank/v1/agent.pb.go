@@ -286,10 +286,11 @@ type SystemInfo struct {
 	DockerVersion string                 `protobuf:"bytes,6,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
 	AgentVersion  string                 `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
 	// Network info for Access Panel (LAN URLs, Tailscale access).
-	LanIps            []string `protobuf:"bytes,8,rep,name=lan_ips,json=lanIps,proto3" json:"lan_ips,omitempty"`
-	TailscaleIp       string   `protobuf:"bytes,9,opt,name=tailscale_ip,json=tailscaleIp,proto3" json:"tailscale_ip,omitempty"`
-	TailscaleHostname string   `protobuf:"bytes,10,opt,name=tailscale_hostname,json=tailscaleHostname,proto3" json:"tailscale_hostname,omitempty"`
-	unknownFields     protoimpl.UnknownFields
+	LanIps               []string `protobuf:"bytes,8,rep,name=lan_ips,json=lanIps,proto3" json:"lan_ips,omitempty"`
+	TailscaleIp          string   `protobuf:"bytes,9,opt,name=tailscale_ip,json=tailscaleIp,proto3" json:"tailscale_ip,omitempty"`
+	TailscaleHostname    string   `protobuf:"bytes,10,opt,name=tailscale_hostname,json=tailscaleHostname,proto3" json:"tailscale_hostname,omitempty"`
+	TailscaleCliAvailable bool   `protobuf:"varint,11,opt,name=tailscale_cli_available,json=tailscaleCliAvailable,proto3" json:"tailscale_cli_available,omitempty"`
+	unknownFields        protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
 
@@ -391,6 +392,13 @@ func (x *SystemInfo) GetTailscaleHostname() string {
 		return x.TailscaleHostname
 	}
 	return ""
+}
+
+func (x *SystemInfo) GetTailscaleCliAvailable() bool {
+	if x != nil {
+		return x.TailscaleCliAvailable
+	}
+	return false
 }
 
 type AgentMessage struct {

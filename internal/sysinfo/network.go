@@ -9,16 +9,17 @@ import (
 
 // NetworkInfo holds discovered network addresses.
 type NetworkInfo struct {
-	LANIPs            []string
-	TailscaleIP       string
-	TailscaleHostname string
+	LANIPs                []string
+	TailscaleIP           string
+	TailscaleHostname     string
+	TailscaleCLIAvailable bool
 }
 
 // CollectNetworkInfo enumerates LAN IPs and detects Tailscale.
 func CollectNetworkInfo() NetworkInfo {
 	info := NetworkInfo{}
 	info.LANIPs = collectLANIPs()
-	info.TailscaleIP, info.TailscaleHostname = detectTailscale()
+	info.TailscaleIP, info.TailscaleHostname, info.TailscaleCLIAvailable = detectTailscale()
 	return info
 }
 
@@ -100,23 +101,29 @@ type tailscaleStatus struct {
 	} `json:"Self"`
 }
 
-// detectTailscale runs `tailscale status --json` and extracts the
-// node's first IP and DNS name. Returns empty strings if Tailscale
-// is not installed or not connected.
-func detectTailscale() (ip, hostname string) {
+// detectTailscale checks whether the tailscale CLI is on the PATH,
+// and if so runs `tailscale status --json` to extract the node's
+// first IP and DNS name. The cliAvailable flag distinguishes "not
+// installed" from "installed but disconnected".
+func detectTailscale() (ip, hostname string, cliAvailable bool) {
+	if _, err := exec.LookPath("tailscale"); err != nil {
+		return "", "", false
+	}
+	cliAvailable = true
+
 	out, err := exec.Command("tailscale", "status", "--json").Output()
 	if err != nil {
-		return "", ""
+		return "", "", true // CLI exists but tailscale not running/connected
 	}
 
 	var status tailscaleStatus
 	if err := json.Unmarshal(out, &status); err != nil {
-		return "", ""
+		return "", "", true
 	}
 
 	if len(status.Self.TailscaleIPs) > 0 {
 		ip = status.Self.TailscaleIPs[0]
 	}
 	hostname = strings.TrimSuffix(status.Self.DNSName, ".")
-	return ip, hostname
+	return ip, hostname, true
 }

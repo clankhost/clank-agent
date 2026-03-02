@@ -85,13 +85,11 @@ func (p *TailscaleProvider) Ensure(ctx context.Context, cfg ProviderConfig) (*Pr
 }
 
 func (p *TailscaleProvider) Disable(ctx context.Context, cfg ProviderConfig) (*ProviderStatus, error) {
-	// Turn off tailscale serve if no other tailscale endpoints exist
-	cmd := exec.CommandContext(ctx, "tailscale", "serve", "--https=443", "off")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[tailscale] Warning: failed to disable tailscale serve: %v\n%s", err, string(output))
-	}
-
+	// tailscale serve proxies ALL HTTPS to Traefik on :80. Individual service
+	// routes are isolated by Traefik path-based routing, so we don't turn off
+	// tailscale serve here — other services may still need it. The Traefik
+	// labels for this service are removed on redeploy.
+	log.Printf("[tailscale] Endpoint %s disabled (path route removed on redeploy)", cfg.EndpointID)
 	return &ProviderStatus{
 		Status:  "disabled",
 		Message: "Tailscale endpoint disabled",

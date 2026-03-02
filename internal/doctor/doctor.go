@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -295,5 +296,61 @@ func CheckDockerGroup() CheckResult {
 		Status:  Warn,
 		Message: fmt.Sprintf("user %s not in docker group", u.Username),
 		Fix:     fmt.Sprintf("sudo usermod -aG docker %s && newgrp docker", u.Username),
+	}
+}
+
+// CheckTailscale verifies Tailscale installation and connectivity.
+// Tailscale is optional, so "not installed" is reported as OK.
+func CheckTailscale() CheckResult {
+	if _, err := exec.LookPath("tailscale"); err != nil {
+		return CheckResult{
+			Status:  OK,
+			Message: "Tailscale not installed (optional)",
+			Fix:     "Install for private HTTPS access: https://tailscale.com/download",
+		}
+	}
+
+	out, err := exec.Command("tailscale", "status", "--json").Output()
+	if err != nil {
+		return CheckResult{
+			Status:  Warn,
+			Message: "Tailscale installed but not running or not connected",
+			Fix:     "Run: sudo tailscale up",
+		}
+	}
+
+	var status struct {
+		Self struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if err := json.Unmarshal(out, &status); err != nil {
+		return CheckResult{
+			Status:  Warn,
+			Message: fmt.Sprintf("cannot parse Tailscale status: %v", err),
+		}
+	}
+
+	hostname := strings.TrimSuffix(status.Self.DNSName, ".")
+	if hostname == "" {
+		return CheckResult{
+			Status:  Warn,
+			Message: "Tailscale connected but no DNS name assigned",
+			Fix:     "Enable MagicDNS in Tailscale admin console",
+		}
+	}
+
+	serveStatus := "not configured"
+	serveOut, serveErr := exec.Command("tailscale", "serve", "status").Output()
+	if serveErr == nil {
+		s := strings.TrimSpace(string(serveOut))
+		if s != "" {
+			serveStatus = s
+		}
+	}
+
+	return CheckResult{
+		Status:  OK,
+		Message: fmt.Sprintf("connected as %s (serve: %s)", hostname, serveStatus),
 	}
 }

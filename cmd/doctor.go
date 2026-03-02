@@ -45,6 +45,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	runner.Add("certificates", func() doctor.CheckResult { return doctor.CheckCertsValid(configDir) })
 	runner.Add("grpc", func() doctor.CheckResult { return doctor.CheckGRPCConnectivity(grpcEndpoint) })
 	runner.Add("systemd", doctor.CheckSystemdService)
+	runner.Add("tailscale", doctor.CheckTailscale)
 
 	results := runner.Run()
 

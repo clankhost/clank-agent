@@ -13,16 +13,17 @@ import (
 // This is a local struct that gets mapped to the proto SystemInfo
 // to avoid leaking proto types through the codebase.
 type Info struct {
-	Hostname          string
-	OS                string
-	Arch              string
-	CPUCores          int64
-	MemoryBytes       int64
-	DockerVersion     string
-	AgentVersion      string
-	LANIPs            []string
-	TailscaleIP       string
-	TailscaleHostname string
+	Hostname              string
+	OS                    string
+	Arch                  string
+	CPUCores              int64
+	MemoryBytes           int64
+	DockerVersion         string
+	AgentVersion          string
+	LANIPs                []string
+	TailscaleIP           string
+	TailscaleHostname     string
+	TailscaleCLIAvailable bool
 }
 
 // ContainerStatus describes a managed container (for heartbeat reporting).
@@ -45,15 +46,16 @@ func Collect() *Info {
 	netInfo := CollectNetworkInfo()
 
 	return &Info{
-		Hostname:          hostname,
-		OS:                runtime.GOOS,
-		Arch:              runtime.GOARCH,
-		CPUCores:          int64(runtime.NumCPU()),
-		MemoryBytes:       memBytes,
-		DockerVersion:     detectDocker(),
-		LANIPs:            netInfo.LANIPs,
-		TailscaleIP:       netInfo.TailscaleIP,
-		TailscaleHostname: netInfo.TailscaleHostname,
+		Hostname:              hostname,
+		OS:                    runtime.GOOS,
+		Arch:                  runtime.GOARCH,
+		CPUCores:              int64(runtime.NumCPU()),
+		MemoryBytes:           memBytes,
+		DockerVersion:         detectDocker(),
+		LANIPs:                netInfo.LANIPs,
+		TailscaleIP:           netInfo.TailscaleIP,
+		TailscaleHostname:     netInfo.TailscaleHostname,
+		TailscaleCLIAvailable: netInfo.TailscaleCLIAvailable,
 	}
 }
 
