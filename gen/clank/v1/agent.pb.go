@@ -273,17 +273,18 @@ func (x *EnrollResponse) GetTunnelEndpoint() string {
 }
 
 type SystemInfo struct {
-	state             protoimpl.MessageState `protogen:"open.v1"`
-	Hostname          string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Os                string                 `protobuf:"bytes,2,opt,name=os,proto3" json:"os,omitempty"`
-	Arch              string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`
-	CpuCores          int64                  `protobuf:"varint,4,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
-	MemoryBytes       int64                  `protobuf:"varint,5,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
-	DockerVersion     string                 `protobuf:"bytes,6,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
-	AgentVersion      string                 `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	LanIps            []string               `protobuf:"bytes,8,rep,name=lan_ips,json=lanIps,proto3" json:"lan_ips,omitempty"`
-	TailscaleIp       string                 `protobuf:"bytes,9,opt,name=tailscale_ip,json=tailscaleIp,proto3" json:"tailscale_ip,omitempty"`
-	TailscaleHostname string                 `protobuf:"bytes,10,opt,name=tailscale_hostname,json=tailscaleHostname,proto3" json:"tailscale_hostname,omitempty"`
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Os            string                 `protobuf:"bytes,2,opt,name=os,proto3" json:"os,omitempty"`
+	Arch          string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`
+	CpuCores      int64                  `protobuf:"varint,4,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
+	MemoryBytes   int64                  `protobuf:"varint,5,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	DockerVersion string                 `protobuf:"bytes,6,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
+	AgentVersion  string                 `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	// Network info for Access Panel (LAN URLs, Tailscale access).
+	LanIps            []string `protobuf:"bytes,8,rep,name=lan_ips,json=lanIps,proto3" json:"lan_ips,omitempty"`
+	TailscaleIp       string   `protobuf:"bytes,9,opt,name=tailscale_ip,json=tailscaleIp,proto3" json:"tailscale_ip,omitempty"`
+	TailscaleHostname string   `protobuf:"bytes,10,opt,name=tailscale_hostname,json=tailscaleHostname,proto3" json:"tailscale_hostname,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -2291,7 +2292,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rgrpc_endpoint\x18\x05 \x01(\tR\fgrpcEndpoint\x12\x1d\n" +
 	"\n" +
 	"auth_token\x18\x06 \x01(\tR\tauthToken\x12'\n" +
-	"\x0ftunnel_endpoint\x18\a \x01(\tR\x0etunnelEndpoint\"\xd8\x01\n" +
+	"\x0ftunnel_endpoint\x18\a \x01(\tR\x0etunnelEndpoint\"\xc3\x02\n" +
 	"\n" +
 	"SystemInfo\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x0e\n" +
@@ -2300,7 +2301,11 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\tcpu_cores\x18\x04 \x01(\x03R\bcpuCores\x12!\n" +
 	"\fmemory_bytes\x18\x05 \x01(\x03R\vmemoryBytes\x12%\n" +
 	"\x0edocker_version\x18\x06 \x01(\tR\rdockerVersion\x12#\n" +
-	"\ragent_version\x18\a \x01(\tR\fagentVersion\"\xd9\x02\n" +
+	"\ragent_version\x18\a \x01(\tR\fagentVersion\x12\x17\n" +
+	"\alan_ips\x18\b \x03(\tR\x06lanIps\x12!\n" +
+	"\ftailscale_ip\x18\t \x01(\tR\vtailscaleIp\x12-\n" +
+	"\x12tailscale_hostname\x18\n" +
+	" \x01(\tR\x11tailscaleHostname\"\xd9\x02\n" +
 	"\fAgentMessage\x123\n" +
 	"\theartbeat\x18\x01 \x01(\v2\x13.clank.v1.HeartbeatH\x00R\theartbeat\x12C\n" +
 	"\x0fdeploy_progress\x18\x02 \x01(\v2\x18.clank.v1.DeployProgressH\x00R\x0edeployProgress\x12@\n" +
