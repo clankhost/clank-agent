@@ -293,6 +293,55 @@ func (m *Manager) ListManagedContainers(ctx context.Context) ([]ContainerInfo, e
 	return result, nil
 }
 
+// ListContainersByLabel returns all containers (including stopped) with the given label key=value.
+func (m *Manager) ListContainersByLabel(ctx context.Context, key, value string) ([]ContainerInfo, error) {
+	containers, err := m.cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filters.NewArgs(filters.Arg("label", key+"="+value)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing containers by label %s=%s: %w", key, value, err)
+	}
+
+	var result []ContainerInfo
+	for _, c := range containers {
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		result = append(result, ContainerInfo{
+			ContainerID: c.ID,
+			Name:        name,
+			State:       c.State,
+			Image:       c.Image,
+			Labels:      c.Labels,
+		})
+	}
+	return result, nil
+}
+
+// RemoveImages removes all images matching a tag prefix (e.g. "clank-myapp:").
+// Best-effort: errors are logged but not returned.
+func (m *Manager) RemoveImages(ctx context.Context, tagPrefix string) {
+	images, err := m.cli.ImageList(ctx, image.ListOptions{All: false})
+	if err != nil {
+		fmt.Printf("Warning: failed to list images for cleanup: %v\n", err)
+		return
+	}
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, tagPrefix) {
+				_, err := m.cli.ImageRemove(ctx, tag, image.RemoveOptions{Force: false})
+				if err != nil {
+					fmt.Printf("Warning: failed to remove image %s: %v\n", tag, err)
+				} else {
+					fmt.Printf("Removed build image %s\n", tag)
+				}
+			}
+		}
+	}
+}
+
 // GetContainerIP returns the IP address of a container on a specific network.
 func (m *Manager) GetContainerIP(ctx context.Context, containerID, networkName string) (string, error) {
 	inspect, err := m.cli.ContainerInspect(ctx, containerID)

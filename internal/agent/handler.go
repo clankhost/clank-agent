@@ -168,7 +168,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	}
 }
 
-// HandleContainerCommand processes a ContainerCommand (stop/start/restart).
+// HandleContainerCommand processes a ContainerCommand (stop/start/restart/remove).
 func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.ContainerCommand) {
 	commandID := cmd.GetCommandId()
 	containerName := cmd.GetContainerName()
@@ -191,6 +191,8 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 		execErr = h.docker.StartContainer(ctx, containerName)
 	case clankv1.ContainerCommand_RESTART:
 		execErr = h.docker.RestartContainer(ctx, containerName)
+	case clankv1.ContainerCommand_REMOVE:
+		execErr = h.removeServiceContainers(ctx, cmd)
 	default:
 		execErr = fmt.Errorf("unknown action: %v", action)
 	}
@@ -218,6 +220,53 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 	if err := stream.Send(msg); err != nil {
 		log.Printf("Failed to send command result: %v", err)
 	}
+}
+
+// removeServiceContainers stops and removes all containers for a service slug,
+// then cleans up build images.
+func (h *CommandHandler) removeServiceContainers(ctx context.Context, cmd *clankv1.ContainerCommand) error {
+	slug := cmd.GetServiceSlug()
+	if slug == "" {
+		// Fallback: just stop+remove the named container
+		name := cmd.GetContainerName()
+		if name == "" {
+			return fmt.Errorf("REMOVE requires service_slug or container_name")
+		}
+		return h.docker.StopAndRemove(ctx, name)
+	}
+
+	containers, err := h.docker.ListContainersByLabel(ctx, "clank.service_slug", slug)
+	if err != nil {
+		return fmt.Errorf("listing containers for slug %s: %w", slug, err)
+	}
+
+	var lastErr error
+	for _, c := range containers {
+		id := c.ContainerID
+		if id == "" {
+			id = c.Name
+		}
+		shortID := c.ContainerID
+		if len(shortID) > 12 {
+			shortID = shortID[:12]
+		}
+		log.Printf("Removing container %s (%s) for service slug %s", c.Name, shortID, slug)
+		if err := h.docker.StopAndRemove(ctx, id); err != nil {
+			log.Printf("Warning: failed to remove container %s: %v", c.Name, err)
+			lastErr = err
+		}
+	}
+
+	// Remove build images (best-effort)
+	h.docker.RemoveImages(ctx, fmt.Sprintf("clank-%s:", slug))
+
+	if lastErr != nil {
+		return fmt.Errorf("some containers failed to remove: %w", lastErr)
+	}
+	if len(containers) == 0 {
+		log.Printf("No containers found for slug %s (already cleaned up)", slug)
+	}
+	return nil
 }
 
 // HandleUpdate downloads a new agent binary, replaces the current one,
