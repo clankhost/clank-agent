@@ -50,6 +50,7 @@ type DeployOpts struct {
 	CPULimit        float64
 	MemoryLimitMB   int
 	ProjectNetwork  string
+	LANIPs          []string // Agent LAN IPs for sslip.io routing
 }
 
 // HealthConfig mirrors the proto HealthCheckConfig.
@@ -100,7 +101,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	// Generate Traefik labels (endpoint-aware if endpoints are provided)
-	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, opts.Port, opts.Endpoints)
+	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, opts.Port, opts.Endpoints, opts.LANIPs)
 
 	// Tell Traefik which network to use for reaching this container
 	if opts.ProjectNetwork != "" {
@@ -215,7 +216,7 @@ func checkHTTPHealth(url string, timeoutSec int) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
-func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int, endpoints []EndpointInfo) map[string]string {
+func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int, endpoints []EndpointInfo, lanIPs []string) map[string]string {
 	labels := map[string]string{
 		"traefik.enable":      "true",
 		"clank.managed":       "true",
@@ -234,10 +235,10 @@ func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, p
 	}
 
 	// Legacy: use domains if no endpoints (backward compat)
-	return generateLegacyLabels(labels, serviceSlug, domains)
+	return generateLegacyLabels(labels, serviceSlug, domains, lanIPs)
 }
 
-func generateLegacyLabels(labels map[string]string, serviceSlug string, domains []string) map[string]string {
+func generateLegacyLabels(labels map[string]string, serviceSlug string, domains []string, lanIPs []string) map[string]string {
 	routerName := "clank-" + serviceSlug
 
 	var safeDomains []string
@@ -250,6 +251,13 @@ func generateLegacyLabels(labels map[string]string, serviceSlug string, domains 
 	}
 	if len(safeDomains) == 0 {
 		safeDomains = []string{serviceSlug + ".localhost"}
+	}
+
+	// Add sslip.io entries for each LAN IP so services are reachable from the network.
+	// e.g. n8n.192.168.1.100.sslip.io resolves to 192.168.1.100, Traefik routes by Host.
+	for _, ip := range lanIPs {
+		sslipHost := fmt.Sprintf("%s.%s.sslip.io", serviceSlug, ip)
+		safeDomains = append(safeDomains, sslipHost)
 	}
 
 	var rules []string

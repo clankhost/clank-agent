@@ -14,6 +14,7 @@ import (
 	"github.com/anaremore/clank/apps/agent/internal/endpoint"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
 	"github.com/anaremore/clank/apps/agent/internal/selfupdate"
+	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
 )
 
 // CommandHandler processes commands received from the control plane.
@@ -141,6 +142,9 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		})
 	}
 
+	// Collect LAN IPs for sslip.io routing labels
+	netInfo := sysinfo.CollectNetworkInfo()
+
 	err := h.deployer.Deploy(ctx, deploy.DeployOpts{
 		DeploymentID:    deployID,
 		ServiceSlug:     cmd.GetServiceSlug(),
@@ -154,6 +158,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		CPULimit:        cpuLimit,
 		MemoryLimitMB:   memoryLimitMB,
 		ProjectNetwork:  cmd.GetProjectNetwork(),
+		LANIPs:          netInfo.LANIPs,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)
 	})
