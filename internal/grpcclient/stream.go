@@ -64,13 +64,16 @@ func SendHeartbeat(stream ConnectStream, info *sysinfo.Info, containers []sysinf
 		Payload: &clankv1.AgentMessage_Heartbeat{
 			Heartbeat: &clankv1.Heartbeat{
 				SystemInfo: &clankv1.SystemInfo{
-					Hostname:      info.Hostname,
-					Os:            info.OS,
-					Arch:          info.Arch,
-					CpuCores:      info.CPUCores,
-					MemoryBytes:   info.MemoryBytes,
-					DockerVersion: info.DockerVersion,
-					AgentVersion:  info.AgentVersion,
+					Hostname:          info.Hostname,
+					Os:                info.OS,
+					Arch:              info.Arch,
+					CpuCores:          info.CPUCores,
+					MemoryBytes:       info.MemoryBytes,
+					DockerVersion:     info.DockerVersion,
+					AgentVersion:      info.AgentVersion,
+					LanIps:            info.LANIPs,
+					TailscaleIp:       info.TailscaleIP,
+					TailscaleHostname: info.TailscaleHostname,
 				},
 				Containers: protoContainers,
 			},

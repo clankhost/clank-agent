@@ -67,8 +67,14 @@ var safeDomainRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?
 func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress ProgressFunc) error {
 	onProgress("deploying", "Starting deployment...", "", "")
 
-	// Ensure services network exists
-	if err := d.docker.EnsureNetwork(ctx, servicesNetwork); err != nil {
+	// Determine which network to start the container on.
+	// Prefer per-project network for isolation; fall back to shared for backward compat.
+	primaryNetwork := opts.ProjectNetwork
+	if primaryNetwork == "" {
+		primaryNetwork = servicesNetwork
+	}
+
+	if err := d.docker.EnsureNetwork(ctx, primaryNetwork); err != nil {
 		return fmt.Errorf("ensuring network: %w", err)
 	}
 
@@ -96,17 +102,23 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Generate Traefik labels (endpoint-aware if endpoints are provided)
 	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, opts.Port, opts.Endpoints)
 
+	// Tell Traefik which network to use for reaching this container
+	if opts.ProjectNetwork != "" {
+		labels["traefik.docker.network"] = opts.ProjectNetwork
+	}
+
 	// Container name
 	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
 
-	// Start container
+	// Start container on the project network (isolated) with slug alias for DNS
 	containerID, err := d.docker.RunContainer(ctx, docker.RunOpts{
 		Image:         opts.ImageTag,
 		Name:          containerName,
 		Env:           opts.Env,
 		Port:          opts.Port,
 		Labels:        labels,
-		Network:       servicesNetwork,
+		Network:       primaryNetwork,
+		NetworkAlias:  opts.ServiceSlug,
 		CPULimit:      opts.CPULimit,
 		MemoryLimitMB: opts.MemoryLimitMB,
 	})
@@ -114,16 +126,16 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		return fmt.Errorf("starting container: %w", err)
 	}
 
-	log.Printf("Container %s started (%s)", containerName, containerID[:12])
+	log.Printf("Container %s started on network %s (%s)", containerName, primaryNetwork, containerID[:12])
 
-	// Connect to per-project network for inter-service DNS discovery (e.g., n8n → n8n-db)
+	// Connect Traefik to the project network so it can route to this container
 	if opts.ProjectNetwork != "" {
-		if err := d.docker.EnsureNetwork(ctx, opts.ProjectNetwork); err != nil {
-			log.Printf("Warning: failed to ensure project network %s: %v", opts.ProjectNetwork, err)
-		} else if err := d.docker.ConnectToNetwork(ctx, containerID, opts.ProjectNetwork, []string{opts.ServiceSlug}); err != nil {
-			log.Printf("Warning: failed to connect to project network %s: %v", opts.ProjectNetwork, err)
-		} else {
-			log.Printf("Connected %s to project network %s (alias: %s)", containerName, opts.ProjectNetwork, opts.ServiceSlug)
+		if traefikID := d.docker.FindTraefikContainer(ctx); traefikID != "" {
+			if err := d.docker.ConnectToNetworkIfNeeded(ctx, traefikID, opts.ProjectNetwork); err != nil {
+				log.Printf("Warning: failed to connect Traefik to network %s: %v", opts.ProjectNetwork, err)
+			} else {
+				log.Printf("Traefik connected to project network %s", opts.ProjectNetwork)
+			}
 		}
 	}
 
@@ -158,8 +170,8 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		}
 	}
 
-	// Get container IP for health checks
-	ip, err := d.docker.GetContainerIP(ctx, containerID, servicesNetwork)
+	// Get container IP for health checks (use project network)
+	ip, err := d.docker.GetContainerIP(ctx, containerID, primaryNetwork)
 	if err != nil {
 		return fmt.Errorf("getting container IP: %w", err)
 	}

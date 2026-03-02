@@ -169,8 +169,12 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 
 	networkConfig := &network.NetworkingConfig{}
 	if opts.Network != "" {
+		epSettings := &network.EndpointSettings{}
+		if opts.NetworkAlias != "" {
+			epSettings.Aliases = []string{opts.NetworkAlias}
+		}
 		networkConfig.EndpointsConfig = map[string]*network.EndpointSettings{
-			opts.Network: {},
+			opts.Network: epSettings,
 		}
 	}
 
@@ -374,6 +378,31 @@ func IsDockerAvailable() (bool, string) {
 		return false, "docker returned empty version"
 	}
 	return true, version
+}
+
+// FindTraefikContainer returns the ID of the running Traefik container
+// (identified by the clank.traefik=true label), or empty string if not found.
+func (m *Manager) FindTraefikContainer(ctx context.Context) string {
+	containers, err := m.cli.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", "clank.traefik=true")),
+	})
+	if err != nil || len(containers) == 0 {
+		return ""
+	}
+	return containers[0].ID
+}
+
+// ConnectToNetworkIfNeeded connects a container to a network, skipping
+// if already connected.
+func (m *Manager) ConnectToNetworkIfNeeded(ctx context.Context, containerID, networkName string) error {
+	inspect, err := m.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return fmt.Errorf("inspecting container: %w", err)
+	}
+	if _, ok := inspect.NetworkSettings.Networks[networkName]; ok {
+		return nil // already connected
+	}
+	return m.cli.NetworkConnect(ctx, networkName, containerID, &network.EndpointSettings{})
 }
 
 func int64Ptr(v int64) *int64 {

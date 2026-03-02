@@ -8,6 +8,7 @@ type RunOpts struct {
 	Port          int
 	Labels        map[string]string
 	Network       string
+	NetworkAlias  string // DNS alias for service discovery on the network
 	CPULimit      float64
 	MemoryLimitMB int
 }

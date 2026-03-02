@@ -273,16 +273,19 @@ func (x *EnrollResponse) GetTunnelEndpoint() string {
 }
 
 type SystemInfo struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Hostname      string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
-	Os            string                 `protobuf:"bytes,2,opt,name=os,proto3" json:"os,omitempty"`
-	Arch          string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`
-	CpuCores      int64                  `protobuf:"varint,4,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
-	MemoryBytes   int64                  `protobuf:"varint,5,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
-	DockerVersion string                 `protobuf:"bytes,6,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
-	AgentVersion  string                 `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state             protoimpl.MessageState `protogen:"open.v1"`
+	Hostname          string                 `protobuf:"bytes,1,opt,name=hostname,proto3" json:"hostname,omitempty"`
+	Os                string                 `protobuf:"bytes,2,opt,name=os,proto3" json:"os,omitempty"`
+	Arch              string                 `protobuf:"bytes,3,opt,name=arch,proto3" json:"arch,omitempty"`
+	CpuCores          int64                  `protobuf:"varint,4,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
+	MemoryBytes       int64                  `protobuf:"varint,5,opt,name=memory_bytes,json=memoryBytes,proto3" json:"memory_bytes,omitempty"`
+	DockerVersion     string                 `protobuf:"bytes,6,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
+	AgentVersion      string                 `protobuf:"bytes,7,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	LanIps            []string               `protobuf:"bytes,8,rep,name=lan_ips,json=lanIps,proto3" json:"lan_ips,omitempty"`
+	TailscaleIp       string                 `protobuf:"bytes,9,opt,name=tailscale_ip,json=tailscaleIp,proto3" json:"tailscale_ip,omitempty"`
+	TailscaleHostname string                 `protobuf:"bytes,10,opt,name=tailscale_hostname,json=tailscaleHostname,proto3" json:"tailscale_hostname,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *SystemInfo) Reset() {
@@ -360,6 +363,27 @@ func (x *SystemInfo) GetDockerVersion() string {
 func (x *SystemInfo) GetAgentVersion() string {
 	if x != nil {
 		return x.AgentVersion
+	}
+	return ""
+}
+
+func (x *SystemInfo) GetLanIps() []string {
+	if x != nil {
+		return x.LanIps
+	}
+	return nil
+}
+
+func (x *SystemInfo) GetTailscaleIp() string {
+	if x != nil {
+		return x.TailscaleIp
+	}
+	return ""
+}
+
+func (x *SystemInfo) GetTailscaleHostname() string {
+	if x != nil {
+		return x.TailscaleHostname
 	}
 	return ""
 }

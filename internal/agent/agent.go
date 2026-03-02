@@ -88,6 +88,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		log.Printf("Warning: could not ensure Traefik is running: %v", err)
 	}
 
+	// Reconnect Traefik to project networks of running containers
+	// (lost on Traefik restart)
+	a.reconnectTraefikToProjectNetworks(ctx)
+
 	// Start cloudflared if tunnel config was persisted from a previous run
 	if a.cfg.TunnelToken != "" {
 		if err := a.dockerMgr.EnsureCloudflared(ctx, a.cfg.TunnelToken); err != nil {
@@ -344,4 +348,34 @@ func (a *Agent) collectInfo() (*sysinfo.Info, []sysinfo.ContainerStatus) {
 	}
 
 	return info, statuses
+}
+
+// reconnectTraefikToProjectNetworks inspects all managed containers
+// and ensures Traefik is connected to each project network they use.
+// This recovers from Traefik restarts which lose dynamic network connections.
+func (a *Agent) reconnectTraefikToProjectNetworks(ctx context.Context) {
+	traefikID := a.dockerMgr.FindTraefikContainer(ctx)
+	if traefikID == "" {
+		return
+	}
+
+	managed, err := a.dockerMgr.ListManagedContainers(ctx)
+	if err != nil {
+		log.Printf("Warning: could not list containers for Traefik reconnection: %v", err)
+		return
+	}
+
+	seen := map[string]bool{}
+	for _, c := range managed {
+		net, ok := c.Labels["traefik.docker.network"]
+		if !ok || net == "" || seen[net] {
+			continue
+		}
+		seen[net] = true
+		if err := a.dockerMgr.ConnectToNetworkIfNeeded(ctx, traefikID, net); err != nil {
+			log.Printf("Warning: could not reconnect Traefik to %s: %v", net, err)
+		} else {
+			log.Printf("Traefik reconnected to project network %s", net)
+		}
+	}
 }
