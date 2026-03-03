@@ -329,7 +329,11 @@ func generateEndpointLabels(labels map[string]string, serviceSlug string, port i
 			labels[fmt.Sprintf("traefik.http.routers.%s.service", routerBase)] = svcName
 
 		case "private_tailscale_https":
-			// Path-based routing on tailnet hostname with StripPrefix
+			// Path-based routing on tailnet hostname with StripPrefix.
+			// The app MUST set its own base-path env var (e.g. N8N_PATH=/n8n/)
+			// so the HTML references /prefix/assets/... URLs. StripPrefix then
+			// removes the prefix before forwarding to the container, which
+			// serves static files at their real root paths.
 			rule := fmt.Sprintf("Host(`%s`)", hostname)
 			if ep.PathPrefix != "" {
 				rule = fmt.Sprintf("Host(`%s`) && PathPrefix(`%s`)", hostname, ep.PathPrefix)
