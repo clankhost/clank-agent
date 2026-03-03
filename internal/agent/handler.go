@@ -142,8 +142,13 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		})
 	}
 
-	// Collect LAN IPs for sslip.io routing labels
+	// Collect all host IPs for sslip.io routing labels (LAN + public)
 	netInfo := sysinfo.CollectNetworkInfo()
+	hostIPs := make([]string, 0, len(netInfo.LANIPs)+1)
+	hostIPs = append(hostIPs, netInfo.LANIPs...)
+	if netInfo.PublicIP != "" {
+		hostIPs = append(hostIPs, netInfo.PublicIP)
+	}
 
 	err := h.deployer.Deploy(ctx, deploy.DeployOpts{
 		DeploymentID:    deployID,
@@ -158,7 +163,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		CPULimit:        cpuLimit,
 		MemoryLimitMB:   memoryLimitMB,
 		ProjectNetwork:  cmd.GetProjectNetwork(),
-		LANIPs:          netInfo.LANIPs,
+		LANIPs:          hostIPs,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)
 	})
