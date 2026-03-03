@@ -230,6 +230,25 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Get container IP for health checks and probing
 	ip, err := d.docker.GetContainerIP(ctx, containerID, primaryNetwork)
 	if err != nil {
+		// IP lookup can fail if the container exited between crash detection and now.
+		// Re-inspect to check if it crashed.
+		ci2, inspErr := d.docker.InspectContainer(ctx, containerID)
+		if inspErr == nil && (ci2.State == "exited" || ci2.State == "dead") {
+			result.Inspection = ci2
+			log.Printf("Container exited after startup (state=%s exit=%d oom=%v)", ci2.State, ci2.ExitCode, ci2.OOMKilled)
+			logs, logErr := d.docker.GetStartupLogs(ctx, containerID, 100)
+			if logErr == nil {
+				result.StartupLogs = logs
+			}
+			if stopErr := d.docker.StopAndRemove(ctx, containerID); stopErr != nil {
+				log.Printf("Warning: failed to remove crashed container: %v", stopErr)
+			}
+			msg := fmt.Sprintf("Container crashed on startup (exit code %d)", ci2.ExitCode)
+			if ci2.OOMKilled {
+				msg = "Container killed: out of memory (OOMKilled)"
+			}
+			return result, fmt.Errorf("%s", msg)
+		}
 		return result, fmt.Errorf("getting container IP: %w", err)
 	}
 	if ci != nil {
