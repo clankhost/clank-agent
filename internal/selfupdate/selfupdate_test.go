@@ -56,7 +56,7 @@ func serveArchive(t *testing.T, archivePath string) *httptest.Server {
 }
 
 func TestApply_SameVersion(t *testing.T) {
-	err := Apply("http://example.com/archive.tar.gz", "", "", "1.0.0", "1.0.0")
+	err := Apply("http://example.com/archive.tar.gz", "", "", "1.0.0", "1.0.0", t.TempDir())
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -73,7 +73,7 @@ func TestApply_ChecksumMismatch(t *testing.T) {
 	os.WriteFile(fakeBin, []byte("#!/bin/sh\necho old"), 0755)
 
 	// Use a bad checksum
-	err := Apply(srv.URL, "0000000000000000000000000000000000000000000000000000000000000000", "", "1.0.0", "2.0.0")
+	err := Apply(srv.URL, "0000000000000000000000000000000000000000000000000000000000000000", "", "1.0.0", "2.0.0", t.TempDir())
 	if err == nil {
 		t.Fatal("expected error for checksum mismatch")
 	}
@@ -91,7 +91,7 @@ func TestApply_DownloadFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	err := Apply(srv.URL+"/missing.tar.gz", "", "", "1.0.0", "2.0.0")
+	err := Apply(srv.URL+"/missing.tar.gz", "", "", "1.0.0", "2.0.0", t.TempDir())
 	if err == nil {
 		t.Fatal("expected error for download failure")
 	}
@@ -149,7 +149,7 @@ func TestBackupAndApply_RestoresOnFailure(t *testing.T) {
 
 	// We can't easily test BackupAndApply since os.Executable() won't point
 	// to our fake binary. Instead, test the Rollback mechanism directly.
-	backupPath := fakeBin + ".prev"
+	backupPath := filepath.Join(tmpDir, "clank-agent.prev")
 	os.WriteFile(backupPath, []byte("#!/bin/sh\necho backup"), 0755)
 
 	// Corrupt the "current" binary
@@ -162,7 +162,7 @@ func TestBackupAndApply_RestoresOnFailure(t *testing.T) {
 }
 
 func TestRollback_NoBackup(t *testing.T) {
-	err := Rollback()
+	err := Rollback(t.TempDir())
 	if err == nil {
 		t.Fatal("expected error when no backup exists")
 	}

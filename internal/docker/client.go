@@ -217,23 +217,17 @@ func (m *Manager) RestartContainer(ctx context.Context, containerID string) erro
 }
 
 // EnsureNetwork creates a network if it doesn't exist.
+// Uses create-then-ignore-exists to avoid TOCTOU race when multiple
+// deploys for the same project run concurrently.
 func (m *Manager) EnsureNetwork(ctx context.Context, name string) error {
-	networks, err := m.cli.NetworkList(ctx, network.ListOptions{
-		Filters: filters.NewArgs(filters.Arg("name", name)),
-	})
-	if err != nil {
-		return fmt.Errorf("listing networks: %w", err)
-	}
-	for _, n := range networks {
-		if n.Name == name {
-			return nil
-		}
-	}
-
-	_, err = m.cli.NetworkCreate(ctx, name, network.CreateOptions{
+	_, err := m.cli.NetworkCreate(ctx, name, network.CreateOptions{
 		Driver: "bridge",
 	})
 	if err != nil {
+		// Another goroutine (concurrent deploy) may have created it first — that's fine.
+		if strings.Contains(err.Error(), "already exists") {
+			return nil
+		}
 		return fmt.Errorf("creating network %s: %w", name, err)
 	}
 	return nil

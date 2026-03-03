@@ -305,6 +305,7 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 			cmd.GetSignature(),
 			h.currentVersion,
 			newVersion,
+			h.cfgDir,
 		)
 
 		if lastErr == nil {

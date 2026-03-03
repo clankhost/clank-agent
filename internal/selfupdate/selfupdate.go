@@ -76,14 +76,18 @@ func isDowngrade(currentVersion, newVersion string) bool {
 }
 
 // Apply downloads the new agent binary, verifies its signature and checksum,
-// and replaces the current binary atomically. Returns nil on success — the
-// caller should exit to let systemd restart with the new binary.
+// and replaces the current binary. Returns nil on success — the caller should
+// exit to let systemd restart with the new binary.
+//
+// The configDir (e.g. /etc/clank-agent) is used for staging the new binary
+// before overwriting the target. This avoids creating new files in the install
+// directory (/usr/local/bin) which may not be writable by the agent user.
 //
 // If signature is non-empty and a signing public key is embedded, the archive's
 // ECDSA P-256 signature is verified before proceeding. This prevents supply-chain
 // attacks where a compromised control plane serves a malicious binary with
 // a matching checksum.
-func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
+func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -169,21 +173,21 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 		return &PhaseError{Phase: "extract", Err: fmt.Errorf("setting permissions: %w", err)}
 	}
 
-	// 6. Atomic replace: stage next to the target (same filesystem) then rename.
-	// We stage to {execPath}.new rather than using tmpDir because systemd's
-	// PrivateTmp=true mounts /tmp on a separate filesystem, and os.Rename
-	// requires source and dest on the same filesystem.
-	stagePath := execPath + ".new"
-	if err := copyFile(newBinaryPath, stagePath); err != nil {
-		return &PhaseError{Phase: "replace", Err: fmt.Errorf("staging binary: %w", err)}
-	}
-	if err := os.Chmod(stagePath, 0755); err != nil {
-		os.Remove(stagePath)
-		return &PhaseError{Phase: "replace", Err: fmt.Errorf("setting stage permissions: %w", err)}
-	}
-	if err := os.Rename(stagePath, execPath); err != nil {
-		os.Remove(stagePath)
-		return &PhaseError{Phase: "replace", Err: fmt.Errorf("replacing binary: %w", err)}
+	// 6. Replace the binary by overwriting in-place.
+	//
+	// We cannot use the classic stage-then-rename approach because the agent
+	// runs as the "clank" user which owns the binary file but does NOT have
+	// write permission on the install directory (/usr/local/bin/ is root:root).
+	// Creating new files (.new) or renaming within that directory requires
+	// directory write permission.
+	//
+	// Instead, we overwrite the existing binary's contents directly. The agent
+	// user can do this because it owns the file. This is non-atomic (a crash
+	// mid-write could corrupt the binary), but the backup in configDir and
+	// systemd restart provide recovery.
+	log.Printf("[update] Overwriting binary at %s", execPath)
+	if err := overwriteFile(newBinaryPath, execPath); err != nil {
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("overwriting binary: %w", err)}
 	}
 
 	log.Printf("[update] Binary replaced at %s", execPath)
@@ -192,7 +196,10 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 
 // BackupAndApply creates a backup of the current binary before applying
 // the update. If Apply fails, the backup is automatically restored.
-func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
+//
+// The backup is stored in configDir (e.g. /etc/clank-agent/) which the
+// agent user owns, avoiding permission issues with /usr/local/bin/.
+func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -216,8 +223,8 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving symlinks: %w", err)}
 	}
 
-	// Create backup
-	backupPath := execPath + ".prev"
+	// Create backup in the config directory (owned by clank user)
+	backupPath := filepath.Join(configDir, "clank-agent.prev")
 	log.Printf("[update] Backing up current binary to %s", backupPath)
 	if err := copyFile(execPath, backupPath); err != nil {
 		return &PhaseError{Phase: "backup", Err: fmt.Errorf("creating backup: %w", err)}
@@ -228,10 +235,10 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 	}
 
 	// Apply the update
-	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion); err != nil {
-		// Restore backup on failure
+	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir); err != nil {
+		// Restore backup on failure by overwriting the binary with the backup
 		log.Printf("[update] Apply failed, restoring backup: %v", err)
-		if restoreErr := os.Rename(backupPath, execPath); restoreErr != nil {
+		if restoreErr := overwriteFile(backupPath, execPath); restoreErr != nil {
 			log.Printf("[update] WARNING: failed to restore backup: %v", restoreErr)
 		}
 		return err
@@ -240,9 +247,9 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 	return nil
 }
 
-// Rollback restores the previous binary from the .prev backup.
+// Rollback restores the previous binary from the backup in configDir.
 // Returns an error if no backup exists.
-func Rollback() error {
+func Rollback(configDir string) error {
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
@@ -252,13 +259,13 @@ func Rollback() error {
 		return fmt.Errorf("resolving symlinks: %w", err)
 	}
 
-	backupPath := execPath + ".prev"
+	backupPath := filepath.Join(configDir, "clank-agent.prev")
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 		return fmt.Errorf("no backup found at %s", backupPath)
 	}
 
 	log.Printf("[update] Rolling back to previous binary from %s", backupPath)
-	if err := os.Rename(backupPath, execPath); err != nil {
+	if err := overwriteFile(backupPath, execPath); err != nil {
 		return fmt.Errorf("restoring backup: %w", err)
 	}
 
@@ -267,13 +274,9 @@ func Rollback() error {
 }
 
 // CleanupBackup removes the .prev backup after a successful update.
-func CleanupBackup() {
-	execPath, err := os.Executable()
-	if err != nil {
-		return
-	}
-	execPath, _ = filepath.EvalSymlinks(execPath)
-	os.Remove(execPath + ".prev")
+func CleanupBackup(configDir string) {
+	backupPath := filepath.Join(configDir, "clank-agent.prev")
+	os.Remove(backupPath)
 }
 
 func downloadFile(url, dest string) error {
@@ -349,6 +352,8 @@ func extractBinary(archivePath, destPath string) error {
 	return fmt.Errorf("clank-agent binary not found in archive")
 }
 
+// copyFile creates dst (or truncates if it exists) and copies src into it.
+// Used for creating files in directories the agent owns (e.g. configDir).
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -356,6 +361,24 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
+
+// overwriteFile replaces the contents of an existing file without creating
+// a new directory entry. This works even when the agent user owns the file
+// but doesn't have write permission on the parent directory.
+func overwriteFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0755)
 	if err != nil {
 		return err
 	}

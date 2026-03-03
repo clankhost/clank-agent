@@ -266,7 +266,7 @@ func (a *Agent) checkPendingUpdate(ctx context.Context) {
 
 	if state.Attempts > 3 {
 		log.Printf("[update] Too many failed startup attempts — rolling back")
-		if err := selfupdate.Rollback(); err != nil {
+		if err := selfupdate.Rollback(a.cfgDir); err != nil {
 			log.Printf("[update] Rollback failed: %v", err)
 		}
 		selfupdate.ClearState(a.cfgDir)
@@ -281,7 +281,7 @@ func (a *Agent) checkPendingUpdate(ctx context.Context) {
 	if a.verifyConnectivity(ctx) {
 		log.Printf("[update] Connectivity verified — update from %s to %s confirmed", state.FromVersion, state.ToVersion)
 		selfupdate.ClearState(a.cfgDir)
-		selfupdate.CleanupBackup()
+		selfupdate.CleanupBackup(a.cfgDir)
 	} else {
 		log.Printf("[update] Connectivity check failed (attempt %d/3)", state.Attempts)
 		// Don't rollback yet — let next restart increment attempts
