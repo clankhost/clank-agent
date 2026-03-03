@@ -228,14 +228,15 @@ func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, p
 	svcName := "clank-" + serviceSlug
 	labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", svcName)] = fmt.Sprintf("%d", port)
 
-	// If endpoints are provided, generate per-endpoint labels
+	// Always generate sslip.io / localhost labels for basic accessibility
+	generateLegacyLabels(labels, serviceSlug, domains, lanIPs)
+
+	// Also generate per-endpoint labels (HTTPS with custom domains)
 	if len(endpoints) > 0 {
 		generateEndpointLabels(labels, serviceSlug, port, endpoints)
-		return labels
 	}
 
-	// Legacy: use domains if no endpoints (backward compat)
-	return generateLegacyLabels(labels, serviceSlug, domains, lanIPs)
+	return labels
 }
 
 func generateLegacyLabels(labels map[string]string, serviceSlug string, domains []string, lanIPs []string) map[string]string {
