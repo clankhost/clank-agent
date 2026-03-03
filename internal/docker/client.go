@@ -145,6 +145,9 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 		Labels:       opts.Labels,
 		ExposedPorts: nat.PortSet{exposedPort: struct{}{}},
 	}
+	if len(opts.Command) > 0 {
+		config.Cmd = opts.Command
+	}
 
 	// Security: drop ALL, then add back the Docker-default capabilities minus
 	// the truly dangerous ones (NET_RAW, SYS_CHROOT, AUDIT_WRITE, SETPCAP,

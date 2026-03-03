@@ -113,6 +113,15 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Container name
 	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
 
+	// Extract CLANK_CONTAINER_CMD magic env var (used as Docker CMD override).
+	// This lets templates specify a custom start command without proto changes.
+	var cmdOverride []string
+	if cmdStr, ok := opts.Env["CLANK_CONTAINER_CMD"]; ok && cmdStr != "" {
+		cmdOverride = []string{"sh", "-c", cmdStr}
+		delete(opts.Env, "CLANK_CONTAINER_CMD") // don't pass to container as env
+		log.Printf("Using CMD override: %v", cmdOverride)
+	}
+
 	// Start container on the project network (isolated) with slug alias for DNS
 	containerID, err := d.docker.RunContainer(ctx, docker.RunOpts{
 		Image:         opts.ImageTag,
@@ -124,6 +133,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		NetworkAlias:  opts.ServiceSlug,
 		CPULimit:      opts.CPULimit,
 		MemoryLimitMB: opts.MemoryLimitMB,
+		Command:       cmdOverride,
 	})
 	if err != nil {
 		return fmt.Errorf("starting container: %w", err)

@@ -11,6 +11,7 @@ type RunOpts struct {
 	NetworkAlias  string // DNS alias for service discovery on the network
 	CPULimit      float64
 	MemoryLimitMB int
+	Command       []string // Override the image CMD (e.g. via CLANK_CONTAINER_CMD)
 }
 
 // ContainerInfo describes a running managed container (for heartbeat reporting).
