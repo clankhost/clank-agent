@@ -16,6 +16,24 @@ import (
 // Traefik labels with PathPrefix routing are applied at deploy time.
 type TailscaleProvider struct{}
 
+// localTraefikCheck verifies service reachability by hitting Traefik on
+// localhost:80 with the Host header set to the Tailscale hostname.
+// This avoids the TLS certificate mismatch that happens when the agent
+// tries to reach the external HTTPS URL from the same machine — the
+// request would bypass Tailscale Serve and hit Traefik's port 443
+// directly, where Traefik presents its self-signed default cert instead
+// of the Tailscale-issued cert.
+func localTraefikCheck(hostname, pathPrefix string, timeout time.Duration) (*http.Response, error) {
+	url := fmt.Sprintf("http://127.0.0.1:80%s", pathPrefix)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Host = hostname
+	client := &http.Client{Timeout: timeout}
+	return client.Do(req)
+}
+
 func (p *TailscaleProvider) Name() string { return "private_tailscale_https" }
 
 // getTailscaleHostname discovers the machine's tailnet DNS name.
@@ -70,12 +88,14 @@ func (p *TailscaleProvider) Ensure(ctx context.Context, cfg ProviderConfig) (*Pr
 	}
 	resolvedURL := fmt.Sprintf("https://%s%s", tsHostname, pathPrefix)
 
-	log.Printf("[tailscale] Endpoint %s: serve configured, checking reachability at %s", cfg.EndpointID, resolvedURL)
+	log.Printf("[tailscale] Endpoint %s: serve configured, checking reachability via Traefik at http://127.0.0.1:80%s (Host: %s)", cfg.EndpointID, pathPrefix, tsHostname)
 
-	// Quick reachability check — if the service container isn't running yet
-	// (e.g. redeploy is still in progress), report provisioning instead of active.
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(resolvedURL)
+	// Check reachability by hitting Traefik directly on localhost:80 with the
+	// Host header set to the Tailscale hostname. We can't use the external
+	// https:// URL from the same machine because it would bypass Tailscale
+	// Serve and hit Traefik's port 443 directly, causing a TLS cert mismatch
+	// (Traefik's self-signed cert vs the Tailscale hostname).
+	resp, err := localTraefikCheck(tsHostname, pathPrefix, 5*time.Second)
 	if err != nil {
 		log.Printf("[tailscale] Endpoint %s: serve configured but not yet reachable: %v", cfg.EndpointID, err)
 		return &ProviderStatus{
@@ -161,9 +181,9 @@ func (p *TailscaleProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*Pr
 	}
 	resolvedURL := fmt.Sprintf("https://%s%s", tsHostname, pathPrefix)
 
-	// Try to reach the endpoint from agent
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(resolvedURL)
+	// Check reachability by hitting Traefik directly on localhost:80 with the
+	// Host header. See comment in Ensure() for why we can't use the external URL.
+	resp, err := localTraefikCheck(tsHostname, pathPrefix, 10*time.Second)
 	if err != nil {
 		diag["agent_verify"] = fmt.Sprintf("error: %v", err)
 		return &ProviderStatus{

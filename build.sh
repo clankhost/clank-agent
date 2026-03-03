@@ -8,6 +8,9 @@
 # Version is read from install-files/VERSION (single source of truth).
 # The ldflags target is github.com/anaremore/clank/apps/agent/cmd.Version
 # (NOT main.version — the variable lives in the cmd package).
+#
+# IMPORTANT: Always use this script instead of raw `go build`.
+# Raw `go build` on Windows produces a Windows PE binary and version="dev".
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -24,6 +27,6 @@ LDFLAGS="-s -w \
 TARGET_OS=${GOOS:-linux}
 TARGET_ARCH=${GOARCH:-amd64}
 
-echo "Building clank-agent v${VERSION} (${COMMIT}) for ${TARGET_OS}/${TARGET_ARCH}..."
-GOOS=$TARGET_OS GOARCH=$TARGET_ARCH go build -ldflags "${LDFLAGS}" -o "../../install-files/clank-agent" .
-echo "Done → install-files/clank-agent"
+echo "  Building clank-agent v${VERSION} (${COMMIT}) for ${TARGET_OS}/${TARGET_ARCH}..."
+CGO_ENABLED=0 GOOS=$TARGET_OS GOARCH=$TARGET_ARCH go build -ldflags "${LDFLAGS}" -o "../../install-files/clank-agent" .
+echo "  Done → install-files/clank-agent"
