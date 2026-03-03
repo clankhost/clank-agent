@@ -158,6 +158,11 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 
 	log.Println("Connected to control plane")
 
+	// Drain any deploy results queued from a previous broken connection.
+	// This ensures the API learns about deploys that completed while
+	// the stream was down (e.g., Cloudflare RST_STREAM mid-deploy).
+	a.handler.DrainPendingResults(stream)
+
 	// Start heartbeat sender in a goroutine
 	streamCtx, streamCancel := context.WithCancel(ctx)
 	defer streamCancel()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
@@ -17,6 +18,13 @@ import (
 	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
 )
 
+// Terminal deploy statuses — if Send fails for these, queue for retry.
+var terminalDeployStatuses = map[string]bool{
+	"active":       true,
+	"failed":       true,
+	"build_failed": true,
+}
+
 // CommandHandler processes commands received from the control plane.
 type CommandHandler struct {
 	docker         *docker.Manager
@@ -26,6 +34,11 @@ type CommandHandler struct {
 	cfg            *Config
 	cfgDir         string
 	currentVersion string
+
+	// pendingResults holds deploy progress messages whose Send failed
+	// (stream broke mid-deploy). Drained on the next successful connection.
+	pendingMu      sync.Mutex
+	pendingResults []*clankv1.AgentMessage
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
@@ -50,6 +63,43 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 	}
 }
 
+// queuePendingResult stores a message for retry on the next connection.
+func (h *CommandHandler) queuePendingResult(msg *clankv1.AgentMessage) {
+	h.pendingMu.Lock()
+	defer h.pendingMu.Unlock()
+	// Cap at 64 to prevent unbounded growth if agent stays disconnected
+	if len(h.pendingResults) < 64 {
+		h.pendingResults = append(h.pendingResults, msg)
+		log.Printf("Queued pending deploy result (%d in queue)", len(h.pendingResults))
+	}
+}
+
+// DrainPendingResults sends any queued deploy results on the given stream.
+// Called by the agent after establishing a new connection.
+func (h *CommandHandler) DrainPendingResults(stream grpcclient.ConnectStream) {
+	h.pendingMu.Lock()
+	results := h.pendingResults
+	h.pendingResults = nil
+	h.pendingMu.Unlock()
+
+	if len(results) == 0 {
+		return
+	}
+
+	log.Printf("Draining %d pending deploy result(s) on new connection", len(results))
+	for _, msg := range results {
+		if err := stream.Send(msg); err != nil {
+			log.Printf("Failed to send pending result on new stream: %v (re-queuing)", err)
+			h.queuePendingResult(msg)
+		} else {
+			// Log what we sent
+			if dp := msg.GetDeployProgress(); dp != nil {
+				log.Printf("Sent pending deploy result: deployment=%s status=%s", dp.DeploymentId, dp.Status)
+			}
+		}
+	}
+}
+
 // HandleDeploy processes a DeployCommand — clone+build or image pull, then deploy.
 func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.DeployCommand) {
 	deployID := cmd.GetDeploymentId()
@@ -71,6 +121,12 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		}
 		if err := stream.Send(msg); err != nil {
 			log.Printf("Failed to send deploy progress: %v", err)
+			// Queue terminal statuses for retry on next connection.
+			// These are the final results the API needs to mark the
+			// deployment as active or failed.
+			if terminalDeployStatuses[status] {
+				h.queuePendingResult(msg)
+			}
 		}
 	}
 
