@@ -105,6 +105,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	deployID := cmd.GetDeploymentId()
 	log.Printf("Handling deploy command for deployment %s (service: %s)", deployID, cmd.GetServiceSlug())
 
+	// sendProgress sends intermediate progress updates (no introspection attached).
 	sendProgress := func(status, message, containerID, containerName, imageTag, gitSHA string) {
 		msg := &clankv1.AgentMessage{
 			Payload: &clankv1.AgentMessage_DeployProgress{
@@ -121,9 +122,52 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		}
 		if err := stream.Send(msg); err != nil {
 			log.Printf("Failed to send deploy progress: %v", err)
-			// Queue terminal statuses for retry on next connection.
-			// These are the final results the API needs to mark the
-			// deployment as active or failed.
+			if terminalDeployStatuses[status] {
+				h.queuePendingResult(msg)
+			}
+		}
+	}
+
+	// sendTerminalProgress sends a terminal (active/failed) progress with
+	// introspection data and startup logs attached.
+	sendTerminalProgress := func(status, message, containerID, containerName, imageTag, gitSHA string, result *deploy.DeployResult) {
+		dp := &clankv1.DeployProgress{
+			DeploymentId:  deployID,
+			Status:        status,
+			Message:       message,
+			ContainerId:   containerID,
+			ContainerName: containerName,
+			ImageTag:      imageTag,
+			GitSha:        gitSHA,
+		}
+
+		if result != nil {
+			// Attach startup logs (Phase A)
+			if result.StartupLogs != "" {
+				// Truncate to 4KB for the proto message
+				logs := result.StartupLogs
+				if len(logs) > 4096 {
+					logs = logs[:4096]
+				}
+				dp.StartupLogs = logs
+			}
+
+			// Attach effective port (Phase D)
+			if result.EffectivePort > 0 {
+				dp.EffectivePort = int32(result.EffectivePort)
+			}
+
+			// Build ContainerIntrospection (Phase B)
+			dp.Introspection = buildIntrospectionProto(result)
+		}
+
+		msg := &clankv1.AgentMessage{
+			Payload: &clankv1.AgentMessage_DeployProgress{
+				DeployProgress: dp,
+			},
+		}
+		if err := stream.Send(msg); err != nil {
+			log.Printf("Failed to send deploy progress: %v", err)
 			if terminalDeployStatuses[status] {
 				h.queuePendingResult(msg)
 			}
@@ -206,7 +250,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		hostIPs = append(hostIPs, netInfo.PublicIP)
 	}
 
-	err := h.deployer.Deploy(ctx, deploy.DeployOpts{
+	deployResult, err := h.deployer.Deploy(ctx, deploy.DeployOpts{
 		DeploymentID:    deployID,
 		ServiceSlug:     cmd.GetServiceSlug(),
 		ImageTag:        imageTag,
@@ -225,8 +269,62 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	})
 
 	if err != nil {
-		sendProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA)
+		sendTerminalProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA, deployResult)
+	} else {
+		// The deployer already called onProgress("active", ...) for intermediate
+		// progress. Send a terminal message with introspection attached.
+		// Note: the deployer's onProgress already reported "active" to the stream,
+		// but that message didn't have introspection. We don't re-send "active" here
+		// because the first one already transitioned the deployment state.
+		// Instead, we only attach introspection to failed deployments.
+		// For active deploys, the deployer's onProgress("active",...) suffices,
+		// but we want introspection too. Let's send it as part of the active message.
+		// We need to check if the deployer already sent the terminal "active".
+		// Since it did via onProgress, and we can't un-send, we send a supplementary
+		// message. However, the API ignores duplicate "active" transitions.
+		// So we send another "active" with introspection attached.
+		if deployResult != nil && (deployResult.Inspection != nil || len(deployResult.Ports) > 0 || deployResult.EffectivePort != int(cmd.GetPort())) {
+			sendTerminalProgress("active", "Deployment active (introspection attached)", "", "", imageTag, gitSHA, deployResult)
+		}
 	}
+}
+
+// buildIntrospectionProto converts a DeployResult into a proto ContainerIntrospection.
+func buildIntrospectionProto(result *deploy.DeployResult) *clankv1.ContainerIntrospection {
+	if result == nil {
+		return nil
+	}
+
+	intro := &clankv1.ContainerIntrospection{}
+
+	// Discovered ports
+	for _, p := range result.Ports {
+		intro.DiscoveredPorts = append(intro.DiscoveredPorts, &clankv1.DiscoveredPort{
+			Port:     int32(p.Port),
+			Protocol: p.Protocol,
+			Source:   p.Source,
+		})
+	}
+
+	// Container inspection
+	if result.Inspection != nil {
+		intro.ContainerIp = result.Inspection.IP
+		intro.Networks = result.Inspection.Networks
+		intro.ExitCode = int32(result.Inspection.ExitCode)
+		intro.OomKilled = result.Inspection.OOMKilled
+	}
+
+	// Image metadata
+	if result.ImageMeta != nil {
+		for _, p := range result.ImageMeta.ExposedPorts {
+			intro.ImageExposePorts = append(intro.ImageExposePorts, int32(p))
+		}
+		intro.ImageCmd = result.ImageMeta.Cmd
+		intro.ImageEntrypoint = result.ImageMeta.Entrypoint
+		intro.HasImageHealthcheck = result.ImageMeta.Healthcheck != nil
+	}
+
+	return intro
 }
 
 // HandleContainerCommand processes a ContainerCommand (stop/start/restart/remove).
