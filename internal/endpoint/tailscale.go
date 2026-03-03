@@ -70,16 +70,51 @@ func (p *TailscaleProvider) Ensure(ctx context.Context, cfg ProviderConfig) (*Pr
 	}
 	resolvedURL := fmt.Sprintf("https://%s%s", tsHostname, pathPrefix)
 
-	log.Printf("[tailscale] Endpoint %s: serve configured, accessible at %s", cfg.EndpointID, resolvedURL)
+	log.Printf("[tailscale] Endpoint %s: serve configured, checking reachability at %s", cfg.EndpointID, resolvedURL)
 
+	// Quick reachability check — if the service container isn't running yet
+	// (e.g. redeploy is still in progress), report provisioning instead of active.
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(resolvedURL)
+	if err != nil {
+		log.Printf("[tailscale] Endpoint %s: serve configured but not yet reachable: %v", cfg.EndpointID, err)
+		return &ProviderStatus{
+			Status:      "provisioning",
+			Message:     fmt.Sprintf("Tailscale Serve configured. Waiting for service to become reachable at %s", resolvedURL),
+			ResolvedURL: resolvedURL,
+			VerifiedBy:  "agent",
+			Diagnostics: map[string]string{
+				"tailscale_hostname": tsHostname,
+				"path_prefix":       pathPrefix,
+			},
+		}, nil
+	}
+	resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		return &ProviderStatus{
+			Status:      "active",
+			Message:     fmt.Sprintf("Tailscale HTTPS endpoint active at %s", resolvedURL),
+			ResolvedURL: resolvedURL,
+			VerifiedBy:  "agent",
+			Diagnostics: map[string]string{
+				"tailscale_hostname": tsHostname,
+				"path_prefix":       pathPrefix,
+				"http_status":       fmt.Sprintf("%d", resp.StatusCode),
+			},
+		}, nil
+	}
+
+	// Got a response but it's an error (404, 502, etc.) — service not ready
 	return &ProviderStatus{
-		Status:      "active",
-		Message:     fmt.Sprintf("Tailscale HTTPS endpoint active at %s", resolvedURL),
+		Status:      "provisioning",
+		Message:     fmt.Sprintf("Tailscale Serve configured but service returned HTTP %d. Deploy the service and try again.", resp.StatusCode),
 		ResolvedURL: resolvedURL,
 		VerifiedBy:  "agent",
 		Diagnostics: map[string]string{
 			"tailscale_hostname": tsHostname,
 			"path_prefix":       pathPrefix,
+			"http_status":       fmt.Sprintf("%d", resp.StatusCode),
 		},
 	}, nil
 }
@@ -140,11 +175,23 @@ func (p *TailscaleProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*Pr
 		}, nil
 	}
 	resp.Body.Close()
-	diag["agent_verify"] = fmt.Sprintf("ok (status %d)", resp.StatusCode)
+	diag["agent_verify"] = fmt.Sprintf("status %d", resp.StatusCode)
 
+	// 2xx/3xx = service is healthy; 401/403 = service is up but requires auth (still active)
+	if resp.StatusCode >= 200 && resp.StatusCode < 400 || resp.StatusCode == 401 || resp.StatusCode == 403 {
+		return &ProviderStatus{
+			Status:      "active",
+			Message:     fmt.Sprintf("Tailscale endpoint healthy at %s (HTTP %d)", resolvedURL, resp.StatusCode),
+			ResolvedURL: resolvedURL,
+			VerifiedBy:  "agent",
+			Diagnostics: diag,
+		}, nil
+	}
+
+	// 404/502/503/504 = Traefik is responding but service container isn't routable
 	return &ProviderStatus{
-		Status:      "active",
-		Message:     fmt.Sprintf("Tailscale endpoint healthy at %s", resolvedURL),
+		Status:      "degraded",
+		Message:     fmt.Sprintf("Tailscale Serve is working but service returned HTTP %d. Is the service deployed?", resp.StatusCode),
 		ResolvedURL: resolvedURL,
 		VerifiedBy:  "agent",
 		Diagnostics: diag,
