@@ -11,6 +11,18 @@ import (
 	"google.golang.org/grpc"
 )
 
+// allIPs combines LAN IPs and public IP into a single slice for the
+// heartbeat proto. The API separates them on receive (public → server.public_ip,
+// private → server.lan_ips). This avoids a proto schema change.
+func allIPs(info *sysinfo.Info) []string {
+	ips := make([]string, 0, len(info.LANIPs)+1)
+	ips = append(ips, info.LANIPs...)
+	if info.PublicIP != "" {
+		ips = append(ips, info.PublicIP)
+	}
+	return ips
+}
+
 // ConnectStream is a bidirectional stream for the Connect RPC.
 type ConnectStream = grpc.BidiStreamingClient[clankv1.AgentMessage, clankv1.ControlMessage]
 
@@ -71,7 +83,7 @@ func SendHeartbeat(stream ConnectStream, info *sysinfo.Info, containers []sysinf
 					MemoryBytes:           info.MemoryBytes,
 					DockerVersion:         info.DockerVersion,
 					AgentVersion:          info.AgentVersion,
-					LanIps:                info.LANIPs,
+					LanIps:                allIPs(info),
 					TailscaleIp:           info.TailscaleIP,
 					TailscaleHostname:     info.TailscaleHostname,
 					TailscaleCliAvailable: info.TailscaleCLIAvailable,

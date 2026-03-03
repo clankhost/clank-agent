@@ -21,6 +21,7 @@ type Info struct {
 	DockerVersion         string
 	AgentVersion          string
 	LANIPs                []string
+	PublicIP              string
 	TailscaleIP           string
 	TailscaleHostname     string
 	TailscaleCLIAvailable bool
@@ -53,6 +54,7 @@ func Collect() *Info {
 		MemoryBytes:           memBytes,
 		DockerVersion:         detectDocker(),
 		LANIPs:                netInfo.LANIPs,
+		PublicIP:              netInfo.PublicIP,
 		TailscaleIP:           netInfo.TailscaleIP,
 		TailscaleHostname:     netInfo.TailscaleHostname,
 		TailscaleCLIAvailable: netInfo.TailscaleCLIAvailable,

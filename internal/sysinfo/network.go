@@ -2,23 +2,28 @@ package sysinfo
 
 import (
 	"encoding/json"
+	"io"
 	"net"
+	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // NetworkInfo holds discovered network addresses.
 type NetworkInfo struct {
 	LANIPs                []string
+	PublicIP              string
 	TailscaleIP           string
 	TailscaleHostname     string
 	TailscaleCLIAvailable bool
 }
 
-// CollectNetworkInfo enumerates LAN IPs and detects Tailscale.
+// CollectNetworkInfo enumerates LAN IPs, detects public IP, and detects Tailscale.
 func CollectNetworkInfo() NetworkInfo {
 	info := NetworkInfo{}
 	info.LANIPs = collectLANIPs()
+	info.PublicIP = detectPublicIP()
 	info.TailscaleIP, info.TailscaleHostname, info.TailscaleCLIAvailable = detectTailscale()
 	return info
 }
@@ -91,6 +96,31 @@ func isPrivateIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// detectPublicIP queries an external service to discover the host's
+// public IPv4 address. Returns "" on any failure (timeout, no internet, etc).
+// Uses a short timeout to avoid blocking heartbeats on slow networks.
+func detectPublicIP() string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("https://api.ipify.org")
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return ""
+	}
+	ip := strings.TrimSpace(string(body))
+	// Basic validation: must parse as an IP
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
 }
 
 // tailscaleStatus is the minimal subset of `tailscale status --json`.
