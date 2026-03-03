@@ -2,9 +2,11 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -231,6 +233,21 @@ func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, p
 	// Always generate sslip.io / localhost labels for basic accessibility
 	generateLegacyLabels(labels, serviceSlug, domains, lanIPs)
 
+	// Resolve empty Tailscale hostnames locally at deploy time.
+	// This handles the race condition where an endpoint is created simultaneously
+	// with a deploy — the API may not have the hostname yet, but the agent
+	// can discover it from the local Tailscale daemon.
+	for i := range endpoints {
+		if endpoints[i].Provider == "private_tailscale_https" && endpoints[i].Hostname == "" {
+			if host, err := resolveTailscaleHostname(); err == nil {
+				endpoints[i].Hostname = host
+				log.Printf("Resolved Tailscale hostname for endpoint %s at deploy time: %s", endpoints[i].EndpointID, host)
+			} else {
+				log.Printf("Could not resolve Tailscale hostname for endpoint %s: %v", endpoints[i].EndpointID, err)
+			}
+		}
+	}
+
 	// Also generate per-endpoint labels (HTTPS with custom domains)
 	if len(endpoints) > 0 {
 		generateEndpointLabels(labels, serviceSlug, port, endpoints)
@@ -332,4 +349,28 @@ func generateEndpointLabels(labels map[string]string, serviceSlug string, port i
 			labels[fmt.Sprintf("traefik.http.routers.%s.service", routerBase)] = svcName
 		}
 	}
+}
+
+// resolveTailscaleHostname discovers the machine's tailnet DNS name by
+// running `tailscale status --json`. Used at deploy time to fill in empty
+// hostnames for Tailscale endpoints (race condition: endpoint created
+// milliseconds before deploy, hostname not yet reported by agent).
+func resolveTailscaleHostname() (string, error) {
+	out, err := exec.Command("tailscale", "status", "--json").Output()
+	if err != nil {
+		return "", fmt.Errorf("tailscale not available: %w", err)
+	}
+	var status struct {
+		Self struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if err := json.Unmarshal(out, &status); err != nil {
+		return "", fmt.Errorf("parsing tailscale status: %w", err)
+	}
+	hostname := strings.TrimSuffix(status.Self.DNSName, ".")
+	if hostname == "" {
+		return "", fmt.Errorf("tailscale DNSName is empty")
+	}
+	return hostname, nil
 }
