@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,6 +15,50 @@ import (
 
 	"github.com/anaremore/clank/apps/agent/internal/docker"
 )
+
+// imageHandler defines auto-injection behavior for a known Docker image.
+type imageHandler struct {
+	name            string
+	prefixes        []string
+	inject          func(env map[string]string, resolvedURL, pathPrefix string)
+	startupRetries  int // closed-port retries (0 = use default)
+	startupInterval int // seconds between retries (0 = use default)
+}
+
+var imageHandlers = []imageHandler{
+	{
+		name:     "wordpress",
+		prefixes: []string{"wordpress:", "library/wordpress:", "docker.io/library/wordpress:"},
+		inject:   injectWordPressEnvVars,
+	},
+	{
+		name:            "openclaw",
+		prefixes:        []string{"alpine/openclaw:", "openclaw/openclaw:", "ghcr.io/openclaw/openclaw:", "coollabsio/openclaw:"},
+		inject:          injectOpenClawEnvVars,
+		startupRetries:  10,
+		startupInterval: 15, // ~150s total — gateway needs ~120s to initialize on low-end machines
+	},
+}
+
+// matchesImageHandler returns the first handler whose prefix matches imageTag, or nil.
+func matchesImageHandler(imageTag string) *imageHandler {
+	tag := strings.ToLower(imageTag)
+	for i := range imageHandlers {
+		for _, prefix := range imageHandlers[i].prefixes {
+			if strings.HasPrefix(tag, prefix) {
+				return &imageHandlers[i]
+			}
+		}
+	}
+	return nil
+}
+
+// generateHexToken returns a random hex string of numBytes*2 characters.
+func generateHexToken(numBytes int) string {
+	b := make([]byte, numBytes)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 const servicesNetwork = "clank-services"
 
@@ -152,6 +198,10 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// Container name
 	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
+
+	// Auto-inject endpoint-aware env vars (base path, image-specific config).
+	// Runs BEFORE CMD extraction so image handlers can provide default CMDs.
+	injectEndpointEnvVars(opts.Env, opts.ImageTag, opts.Endpoints)
 
 	// Extract CLANK_CONTAINER_CMD magic env var (used as Docker CMD override).
 	var cmdOverride []string
@@ -331,10 +381,22 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	if primaryProtocol == "closed" {
 		log.Printf("Primary port %d is closed, waiting for startup...", effectivePort)
 		retries := 3
+		interval := 10
+
+		// Image handlers can specify longer startup timeouts for slow-init apps.
+		if handler := matchesImageHandler(opts.ImageTag); handler != nil {
+			if handler.startupRetries > 0 {
+				retries = handler.startupRetries
+			}
+			if handler.startupInterval > 0 {
+				interval = handler.startupInterval
+			}
+		}
+
+		// User-configured values override handler defaults.
 		if hc.Retries > 0 {
 			retries = hc.Retries
 		}
-		interval := 10
 		if hc.IntervalSeconds > 0 {
 			interval = hc.IntervalSeconds
 		}
@@ -594,6 +656,138 @@ func generateEndpointLabels(labels map[string]string, serviceSlug string, port i
 			labels[fmt.Sprintf("traefik.http.routers.%s.service", routerBase)] = svcName
 		}
 	}
+}
+
+// injectEndpointEnvVars examines the image tag and active endpoints, then
+// auto-injects env vars (CLANK_BASE_PATH, CLANK_BASE_URL, image-specific config)
+// into the env map. User-set values are never overwritten.
+func injectEndpointEnvVars(env map[string]string, imageTag string, endpoints []EndpointInfo) {
+	var resolvedURL, pathPrefix string
+
+	// Resolve endpoint URL if endpoints exist.
+	if len(endpoints) > 0 {
+		// Find the best endpoint: prefer one with a PathPrefix, otherwise first with a hostname.
+		var best *EndpointInfo
+		for i := range endpoints {
+			if endpoints[i].Hostname == "" {
+				continue
+			}
+			if best == nil {
+				best = &endpoints[i]
+			}
+			if endpoints[i].PathPrefix != "" {
+				best = &endpoints[i]
+				break
+			}
+		}
+		if best != nil {
+			resolvedURL = resolveEndpointURL(*best)
+			pathPrefix = best.PathPrefix
+
+			if pathPrefix != "" {
+				if _, ok := env["CLANK_BASE_PATH"]; !ok {
+					env["CLANK_BASE_PATH"] = pathPrefix
+					log.Printf("Auto-injected CLANK_BASE_PATH=%s", pathPrefix)
+				}
+			}
+			if resolvedURL != "" {
+				if _, ok := env["CLANK_BASE_URL"]; !ok {
+					env["CLANK_BASE_URL"] = resolvedURL
+					log.Printf("Auto-injected CLANK_BASE_URL=%s", resolvedURL)
+				}
+			}
+		}
+	}
+
+	// App-specific env var injection via image handler registry.
+	// Runs regardless of endpoints — some images (e.g. OpenClaw) need
+	// env vars and CMD overrides even without an endpoint configured.
+	if handler := matchesImageHandler(imageTag); handler != nil {
+		handler.inject(env, resolvedURL, pathPrefix)
+		log.Printf("Applied %s image handler for %s", handler.name, imageTag)
+	}
+}
+
+// resolveEndpointURL derives a full URL (scheme + host + path) from endpoint metadata.
+func resolveEndpointURL(ep EndpointInfo) string {
+	if ep.Hostname == "" {
+		return ""
+	}
+
+	scheme := "http://"
+	switch ep.TLSMode {
+	case "lets_encrypt_http01", "cloudflare_edge", "tailscale_https":
+		scheme = "https://"
+	}
+
+	return scheme + ep.Hostname + ep.PathPrefix
+}
+
+// injectWordPressEnvVars sets WORDPRESS_CONFIG_EXTRA for WordPress images.
+func injectWordPressEnvVars(env map[string]string, resolvedURL, pathPrefix string) {
+	if _, ok := env["WORDPRESS_CONFIG_EXTRA"]; ok {
+		return
+	}
+	wpConfig := buildWordPressConfig(resolvedURL, pathPrefix)
+	if wpConfig != "" {
+		env["WORDPRESS_CONFIG_EXTRA"] = wpConfig
+	}
+}
+
+// injectOpenClawEnvVars sets env vars required for OpenClaw gateway startup.
+// Without OPENCLAW_GATEWAY_TOKEN the gateway never opens its HTTP listener.
+// Without --bind lan --auth token the gateway binds to loopback only (unreachable
+// from outside the container in Docker bridge networking).
+func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string) {
+	if _, ok := env["OPENCLAW_GATEWAY_TOKEN"]; !ok {
+		env["OPENCLAW_GATEWAY_TOKEN"] = generateHexToken(16)
+	}
+	if _, ok := env["NODE_OPTIONS"]; !ok {
+		env["NODE_OPTIONS"] = "--max-old-space-size=1792"
+	}
+	// Override CMD to:
+	//  1. Set controlUi.dangerouslyAllowHostHeaderOriginFallback in config
+	//     (required for non-loopback binding; no env var equivalent)
+	//  2. Start gateway with --bind lan (0.0.0.0) and --auth token
+	if _, ok := env["CLANK_CONTAINER_CMD"]; !ok {
+		env["CLANK_CONTAINER_CMD"] = "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
+	}
+}
+
+// buildWordPressConfig generates the PHP snippet for WORDPRESS_CONFIG_EXTRA.
+// If pathPrefix is set, it includes $_SERVER fixups for path-prefix routing.
+// Otherwise it just sets WP_HOME/WP_SITEURL to the resolved URL.
+func buildWordPressConfig(resolvedURL, pathPrefix string) string {
+	if resolvedURL == "" {
+		return ""
+	}
+
+	if pathPrefix != "" {
+		// Split URL into host-part and path-part for the PHP variables.
+		hostURL := strings.TrimSuffix(resolvedURL, pathPrefix)
+		return fmt.Sprintf(
+			"$clank_prefix = '%s';\n"+
+				"$clank_host = '%s';\n"+
+				"define('WP_HOME', $clank_host . $clank_prefix);\n"+
+				"define('WP_SITEURL', $clank_host . $clank_prefix);\n"+
+				"if (strpos($_SERVER['REQUEST_URI'], $clank_prefix) !== 0) {\n"+
+				"    $_SERVER['REQUEST_URI'] = $clank_prefix . $_SERVER['REQUEST_URI'];\n"+
+				"}\n"+
+				"if (isset($_SERVER['SCRIPT_NAME']) && strpos($_SERVER['SCRIPT_NAME'], $clank_prefix) !== 0) {\n"+
+				"    $_SERVER['SCRIPT_NAME'] = $clank_prefix . $_SERVER['SCRIPT_NAME'];\n"+
+				"}\n"+
+				"if (isset($_SERVER['PHP_SELF']) && strpos($_SERVER['PHP_SELF'], $clank_prefix) !== 0) {\n"+
+				"    $_SERVER['PHP_SELF'] = $clank_prefix . $_SERVER['PHP_SELF'];\n"+
+				"}",
+			pathPrefix, hostURL,
+		)
+	}
+
+	// No path prefix — just set canonical URL.
+	return fmt.Sprintf(
+		"define('WP_HOME', '%s');\ndefine('WP_SITEURL', '%s');",
+		resolvedURL, resolvedURL,
+	)
 }
 
 // resolveTailscaleHostname discovers the machine's tailnet DNS name.
