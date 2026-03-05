@@ -798,8 +798,10 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 		authMode := "token"
 		if isHTTP {
 			// No TLS = no secure context = browser can't send device identity.
-			// Use trusted-proxy auth so Traefik-forwarded local requests pass.
-			authMode = "none"
+			// --auth none is rejected with --bind lan. Use trusted-proxy so the
+			// gateway trusts Traefik-forwarded requests and trustedProxyAuthOk=true
+			// bypasses the device identity check for control UI connections.
+			authMode = "trusted-proxy"
 		}
 		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth " + authMode
 	}
