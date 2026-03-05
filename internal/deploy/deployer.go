@@ -771,12 +771,17 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 	if _, ok := env["NODE_OPTIONS"]; !ok {
 		env["NODE_OPTIONS"] = "--max-old-space-size=1792"
 	}
-	// Override CMD to:
-	//  1. Set controlUi.dangerouslyAllowHostHeaderOriginFallback in config
-	//     (required for non-loopback binding; no env var equivalent)
-	//  2. Start gateway with --bind lan (0.0.0.0) and --auth token
+	// Override CMD to configure and start the gateway:
+	//  1. Allow host-header origin fallback (required for non-loopback binding)
+	//  2. Add endpoint URL to allowedOrigins so the UI doesn't get CORS-blocked
+	//  3. Start gateway with --bind lan (0.0.0.0) and --auth token
 	if _, ok := env["CLANK_CONTAINER_CMD"]; !ok {
-		env["CLANK_CONTAINER_CMD"] = "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
+		configCmds := "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true"
+		if resolvedURL != "" {
+			// Add the endpoint URL as an allowed origin for the control UI.
+			configCmds += fmt.Sprintf(` && node openclaw.mjs config set gateway.controlUi.allowedOrigins '["%s"]'`, resolvedURL)
+		}
+		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
 	}
 }
 
