@@ -2,6 +2,7 @@ package deploy
 
 import (
 	"encoding/hex"
+	"fmt"
 	"testing"
 )
 
@@ -264,7 +265,56 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 		t.Error("CLANK_CONTAINER_CMD should contain --bind lan")
 	}
 	if !contains(cmd, "--auth token") {
-		t.Error("CLANK_CONTAINER_CMD should contain --auth token")
+		t.Error("CLANK_CONTAINER_CMD should contain --auth token for HTTPS")
+	}
+	// HTTPS should NOT have trusted-proxy config or device auth bypass
+	if contains(cmd, "trustedProxy") {
+		t.Error("HTTPS should not set gateway.auth.trustedProxy")
+	}
+	if contains(cmd, "dangerouslyDisableDeviceAuth") {
+		t.Error("HTTPS should not disable device auth")
+	}
+}
+
+func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
+	env := map[string]string{}
+	injectOpenClawEnvVars(env, "http://openclaw.172.30.227.155.sslip.io", "")
+
+	cmd := env["CLANK_CONTAINER_CMD"]
+	if cmd == "" {
+		t.Fatal("CLANK_CONTAINER_CMD should be set")
+	}
+
+	// HTTP should use trusted-proxy auth (Traefik injects identity header)
+	if !contains(cmd, "--auth trusted-proxy") {
+		t.Error("HTTP should use --auth trusted-proxy")
+	}
+	if contains(cmd, "--auth token") {
+		t.Error("HTTP should NOT use --auth token")
+	}
+
+	// Should set gateway.auth.trustedProxy with userHeader
+	if !contains(cmd, `gateway.auth.trustedProxy`) {
+		t.Error("HTTP should set gateway.auth.trustedProxy config")
+	}
+	if !contains(cmd, `X-Openclaw-User`) {
+		t.Error("HTTP should configure X-Openclaw-User as trusted proxy header")
+	}
+
+	// Should disable device auth and allow insecure auth for HTTP
+	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
+		t.Error("HTTP should disable device auth")
+	}
+	if !contains(cmd, "allowInsecureAuth true") {
+		t.Error("HTTP should allow insecure auth")
+	}
+
+	// Should still set trusted proxies and origin fallback
+	if !contains(cmd, "trustedProxies") {
+		t.Error("should set trustedProxies")
+	}
+	if !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback true") {
+		t.Error("should set origin fallback")
 	}
 }
 
@@ -307,7 +357,7 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 		t.Error("NODE_OPTIONS should be set")
 	}
 
-	// Should have CMD override with config set + bind + auth
+	// HTTPS endpoint: should use --auth token, NOT trusted-proxy
 	cmd := env["CLANK_CONTAINER_CMD"]
 	if !contains(cmd, "--bind lan") || !contains(cmd, "--auth token") || !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback") {
 		t.Errorf("CLANK_CONTAINER_CMD incorrect, got %q", cmd)
@@ -316,6 +366,71 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 	// Should NOT have WordPress vars
 	if _, ok := env["WORDPRESS_CONFIG_EXTRA"]; ok {
 		t.Error("WORDPRESS_CONFIG_EXTRA should not be set for OpenClaw")
+	}
+}
+
+func TestInjectEndpointEnvVars_OpenClaw_HTTP(t *testing.T) {
+	env := map[string]string{}
+	endpoints := []EndpointInfo{
+		{Hostname: "openclaw.172.30.227.155.sslip.io", TLSMode: "off"},
+	}
+	injectEndpointEnvVars(env, "alpine/openclaw:latest", endpoints)
+
+	// Should have HTTP base URL
+	if env["CLANK_BASE_URL"] != "http://openclaw.172.30.227.155.sslip.io" {
+		t.Errorf("CLANK_BASE_URL = %q, want http://...", env["CLANK_BASE_URL"])
+	}
+
+	// HTTP endpoint: should use --auth trusted-proxy
+	cmd := env["CLANK_CONTAINER_CMD"]
+	if !contains(cmd, "--auth trusted-proxy") {
+		t.Errorf("HTTP OpenClaw should use --auth trusted-proxy, got %q", cmd)
+	}
+	if !contains(cmd, "gateway.auth.trustedProxy") {
+		t.Error("HTTP OpenClaw should configure gateway.auth.trustedProxy")
+	}
+}
+
+func TestAddOpenClawProxyAuthLabels(t *testing.T) {
+	labels := map[string]string{
+		"traefik.http.routers.clank-myservice.rule":        "Host(`myservice.example.com`)",
+		"traefik.http.routers.clank-myservice.entrypoints": "web",
+		"traefik.http.routers.clank-myservice-ep1.rule":    "Host(`ep1.example.com`)",
+	}
+
+	addOpenClawProxyAuthLabels(labels, "myservice")
+
+	// Should define the middleware
+	mwKey := "traefik.http.middlewares.clank-myservice-ocauth.headers.customrequestheaders.X-Openclaw-User"
+	if labels[mwKey] != "operator" {
+		t.Errorf("middleware label = %q, want 'operator'", labels[mwKey])
+	}
+
+	// Should add middleware ref to both routers
+	mwRef := "clank-myservice-ocauth@docker"
+	for _, router := range []string{"clank-myservice", "clank-myservice-ep1"} {
+		key := fmt.Sprintf("traefik.http.routers.%s.middlewares", router)
+		val, ok := labels[key]
+		if !ok {
+			t.Errorf("missing middlewares label for router %s", router)
+		} else if !contains(val, mwRef) {
+			t.Errorf("router %s middlewares = %q, should contain %q", router, val, mwRef)
+		}
+	}
+}
+
+func TestAddOpenClawProxyAuthLabels_AppendToExisting(t *testing.T) {
+	labels := map[string]string{
+		"traefik.http.routers.clank-svc.rule":        "Host(`svc.example.com`)",
+		"traefik.http.routers.clank-svc.middlewares":  "existing-mw@docker",
+	}
+
+	addOpenClawProxyAuthLabels(labels, "svc")
+
+	mwKey := "traefik.http.routers.clank-svc.middlewares"
+	want := "existing-mw@docker,clank-svc-ocauth@docker"
+	if labels[mwKey] != want {
+		t.Errorf("middlewares = %q, want %q", labels[mwKey], want)
 	}
 }
 

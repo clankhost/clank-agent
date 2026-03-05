@@ -210,6 +210,19 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 	injectEndpointEnvVars(opts.Env, opts.ImageTag, opts.Endpoints)
 
+	// OpenClaw on HTTP: add Traefik middleware to inject trusted-proxy auth header.
+	// This makes the gateway treat every request as pre-authenticated, bypassing
+	// the device identity check that fails without a browser secure context.
+	if handler := matchesImageHandler(opts.ImageTag); handler != nil && handler.name == "openclaw" {
+		for _, ep := range opts.Endpoints {
+			u := resolveEndpointURL(ep)
+			if u != "" && !strings.HasPrefix(u, "https://") {
+				addOpenClawProxyAuthLabels(labels, opts.ServiceSlug)
+				break
+			}
+		}
+	}
+
 	// Image handlers can specify minimum resource requirements. Upgrade
 	// opts when the handler needs more than the API-supplied defaults.
 	cpuLimit := opts.CPULimit
@@ -687,6 +700,38 @@ func generateEndpointLabels(labels map[string]string, serviceSlug string, port i
 	}
 }
 
+// addOpenClawProxyAuthLabels adds a Traefik middleware that injects an
+// X-Openclaw-User header on every request. This makes the gateway treat the
+// connection as trusted-proxy-authenticated, bypassing the device identity
+// check that would otherwise fail on plain HTTP (no Web Crypto API).
+func addOpenClawProxyAuthLabels(labels map[string]string, serviceSlug string) {
+	mwName := fmt.Sprintf("clank-%s-ocauth", serviceSlug)
+
+	// Define the middleware: inject identity header for trusted-proxy auth.
+	labels[fmt.Sprintf("traefik.http.middlewares.%s.headers.customrequestheaders.X-Openclaw-User", mwName)] = "operator"
+
+	// Append this middleware to every router already in the label set.
+	routerRuleKey := regexp.MustCompile(`^traefik\.http\.routers\.(.+)\.rule$`)
+
+	// Collect router names that exist (from .rule keys).
+	routers := map[string]bool{}
+	for k := range labels {
+		if m := routerRuleKey.FindStringSubmatch(k); m != nil {
+			routers[m[1]] = true
+		}
+	}
+
+	mwRef := mwName + "@docker"
+	for router := range routers {
+		key := fmt.Sprintf("traefik.http.routers.%s.middlewares", router)
+		if existing, ok := labels[key]; ok {
+			labels[key] = existing + "," + mwRef
+		} else {
+			labels[key] = mwRef
+		}
+	}
+}
+
 // injectEndpointEnvVars examines the image tag and active endpoints, then
 // auto-injects env vars (CLANK_BASE_PATH, CLANK_BASE_URL, image-specific config)
 // into the env map. User-set values are never overwritten.
@@ -778,8 +823,8 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 	//  1. Allow host-header origin fallback (required for non-loopback binding)
 	//  2. Add endpoint URL to allowedOrigins so the UI doesn't get CORS-blocked
 	//  3. Trust RFC1918 subnets as proxies (Traefik forwards from Docker network)
-	//  4. For HTTP: disable device auth + allow insecure auth so the control UI
-	//     can show the token prompt without requiring Web Crypto (secure context)
+	//  4. For HTTP: use trusted-proxy auth so Traefik's X-Openclaw-User header
+	//     bypasses device identity (browser has no Web Crypto on plain HTTP)
 	if _, ok := env["CLANK_CONTAINER_CMD"]; !ok {
 		configCmds := "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true"
 		if resolvedURL != "" {
@@ -787,15 +832,26 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 		}
 		// Always trust Docker-network proxies so Traefik headers are accepted.
 		configCmds += ` && node openclaw.mjs config set gateway.trustedProxies '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'`
-		if resolvedURL != "" && !strings.HasPrefix(resolvedURL, "https://") {
+
+		isHTTP := resolvedURL != "" && !strings.HasPrefix(resolvedURL, "https://")
+		if isHTTP {
 			// HTTP endpoints lack a secure context — browser Web Crypto API is
-			// unavailable, so device identity will always fail. Disable device
-			// auth so the UI can fall through to token-based auth. The user
-			// enters the OPENCLAW_GATEWAY_TOKEN (from env / logs) to connect.
+			// unavailable, so device identity will always fail.
 			configCmds += " && node openclaw.mjs config set gateway.controlUi.dangerouslyDisableDeviceAuth true"
 			configCmds += " && node openclaw.mjs config set gateway.controlUi.allowInsecureAuth true"
+			// Tell the gateway to accept Traefik's X-Openclaw-User header as
+			// proof of identity. Traefik injects this header via middleware
+			// labels on the container, so every request arrives pre-authenticated.
+			configCmds += ` && node openclaw.mjs config set gateway.auth.trustedProxy '{"userHeader":"X-Openclaw-User"}'`
 		}
-		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
+
+		// Auth mode: trusted-proxy for HTTP (Traefik injects identity header),
+		//            token for HTTPS (browser has secure context for device identity).
+		authMode := "token"
+		if isHTTP {
+			authMode = "trusted-proxy"
+		}
+		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth " + authMode
 	}
 }
 
