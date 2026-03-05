@@ -777,33 +777,25 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 	// Override CMD to configure and start the gateway:
 	//  1. Allow host-header origin fallback (required for non-loopback binding)
 	//  2. Add endpoint URL to allowedOrigins so the UI doesn't get CORS-blocked
-	//  3. Trust the Docker bridge network as a proxy (Traefik forwards requests)
-	//  4. Disable device identity for HTTP (no browser secure context = no Web Crypto)
-	//  5. Start gateway with --bind lan and auth mode appropriate for TLS context
+	//  3. Trust RFC1918 subnets as proxies (Traefik forwards from Docker network)
+	//  4. For HTTP: disable device auth + allow insecure auth so the control UI
+	//     can show the token prompt without requiring Web Crypto (secure context)
 	if _, ok := env["CLANK_CONTAINER_CMD"]; !ok {
 		configCmds := "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true"
 		if resolvedURL != "" {
 			configCmds += fmt.Sprintf(` && node openclaw.mjs config set gateway.controlUi.allowedOrigins '["%s"]'`, resolvedURL)
 		}
-		isHTTP := resolvedURL != "" && !strings.HasPrefix(resolvedURL, "https://")
-		if isHTTP {
+		// Always trust Docker-network proxies so Traefik headers are accepted.
+		configCmds += ` && node openclaw.mjs config set gateway.trustedProxies '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'`
+		if resolvedURL != "" && !strings.HasPrefix(resolvedURL, "https://") {
 			// HTTP endpoints lack a secure context — browser Web Crypto API is
-			// unavailable, so device identity and pairing will always fail.
-			// Trust the Docker network so Traefik-forwarded requests are treated
-			// as local, disable device auth, and use allowInsecureAuth.
+			// unavailable, so device identity will always fail. Disable device
+			// auth so the UI can fall through to token-based auth. The user
+			// enters the OPENCLAW_GATEWAY_TOKEN (from env / logs) to connect.
 			configCmds += " && node openclaw.mjs config set gateway.controlUi.dangerouslyDisableDeviceAuth true"
 			configCmds += " && node openclaw.mjs config set gateway.controlUi.allowInsecureAuth true"
-			configCmds += ` && node openclaw.mjs config set gateway.trustedProxies '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'`
 		}
-		authMode := "token"
-		if isHTTP {
-			// No TLS = no secure context = browser can't send device identity.
-			// --auth none is rejected with --bind lan. Use trusted-proxy so the
-			// gateway trusts Traefik-forwarded requests and trustedProxyAuthOk=true
-			// bypasses the device identity check for control UI connections.
-			authMode = "trusted-proxy"
-		}
-		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth " + authMode
+		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
 	}
 }
 
