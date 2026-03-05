@@ -784,13 +784,13 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 			// Add the endpoint URL as an allowed origin for the control UI.
 			configCmds += fmt.Sprintf(` && node openclaw.mjs config set gateway.controlUi.allowedOrigins '["%s"]'`, resolvedURL)
 		}
-		gatewayCmd := "exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
 		// HTTP endpoints lack a secure context — browser Web Crypto API is
 		// unavailable, so OpenClaw's device identity check will always fail.
+		// Disable it via config so the control UI works over plain HTTP.
 		if resolvedURL != "" && !strings.HasPrefix(resolvedURL, "https://") {
-			gatewayCmd += " --require-device-identity false"
+			configCmds += " && node openclaw.mjs config set gateway.controlUi.dangerouslyDisableDeviceAuth true"
 		}
-		env["CLANK_CONTAINER_CMD"] = configCmds + " && " + gatewayCmd
+		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth token"
 	}
 }
 
