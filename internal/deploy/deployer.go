@@ -205,6 +205,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// Auto-inject endpoint-aware env vars (base path, image-specific config).
 	// Runs BEFORE CMD extraction so image handlers can provide default CMDs.
+	if opts.Env == nil {
+		opts.Env = make(map[string]string)
+	}
 	injectEndpointEnvVars(opts.Env, opts.ImageTag, opts.Endpoints)
 
 	// Image handlers can specify minimum resource requirements. Upgrade
