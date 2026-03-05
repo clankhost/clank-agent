@@ -39,11 +39,30 @@ func (p *DirectProvider) Ensure(ctx context.Context, cfg ProviderConfig) (*Provi
 	}
 	diag["dns"] = fmt.Sprintf("resolved: %v", addrs)
 
-	log.Printf("[direct] Endpoint %s: DNS OK for %s (%v), labels applied at deploy time", cfg.EndpointID, cfg.Hostname, addrs)
+	// Quick port 80 reachability check (best-effort, 3s timeout)
+	// Catches the common case where Traefik failed to bind ports
+	conn, portErr := net.DialTimeout("tcp", cfg.Hostname+":80", 3*time.Second)
+	if portErr != nil {
+		diag["port_80"] = fmt.Sprintf("not reachable: %v", portErr)
+		log.Printf("[direct] Endpoint %s: DNS OK but port 80 not reachable for %s — returning provisioning", cfg.EndpointID, cfg.Hostname)
+		return &ProviderStatus{
+			Status:      "provisioning",
+			Message:     fmt.Sprintf("DNS resolves for %s. Waiting for HTTPS certificate — run a health check to verify.", cfg.Hostname),
+			ResolvedURL: fmt.Sprintf("https://%s", cfg.Hostname),
+			VerifiedBy:  "agent",
+			Diagnostics: diag,
+		}, nil
+	}
+	conn.Close()
+	diag["port_80"] = "ok"
 
+	log.Printf("[direct] Endpoint %s: DNS OK, port 80 reachable for %s — returning provisioning (cert not yet verified)", cfg.EndpointID, cfg.Hostname)
+
+	// Even with port 80 reachable, return "provisioning" because the Let's Encrypt
+	// cert may not be issued yet. Doctor (auto-triggered by frontend) will promote to "active".
 	return &ProviderStatus{
-		Status:      "active",
-		Message:     fmt.Sprintf("Public endpoint active at https://%s (Let's Encrypt)", cfg.Hostname),
+		Status:      "provisioning",
+		Message:     fmt.Sprintf("DNS and port 80 OK for %s. Let's Encrypt certificate provisioning — run a health check to verify.", cfg.Hostname),
 		ResolvedURL: fmt.Sprintf("https://%s", cfg.Hostname),
 		VerifiedBy:  "agent",
 		Diagnostics: diag,

@@ -19,7 +19,9 @@ const (
 
 // EnsureTraefik ensures a Traefik container is running on the agent host.
 // If it's already running, this is a no-op.
-func (m *Manager) EnsureTraefik(ctx context.Context) error {
+// publicIP binds Traefik to a specific IP (avoids conflicts with Tailscale on 0.0.0.0).
+// Pass "" to bind to all interfaces (default behavior).
+func (m *Manager) EnsureTraefik(ctx context.Context, publicIP string) error {
 	// Check if clank-traefik is already running
 	id, _, err := m.FindContainerByLabel(ctx, "clank.traefik", "true")
 	if err != nil {
@@ -66,10 +68,7 @@ func (m *Manager) EnsureTraefik(ctx context.Context) error {
 	}
 
 	hostConfig := &container.HostConfig{
-		PortBindings: nat.PortMap{
-			"80/tcp":  {{HostIP: "", HostPort: "80"}},
-			"443/tcp": {{HostIP: "", HostPort: "443"}},
-		},
+		PortBindings: traefikPortBindings(publicIP),
 		Mounts: []mount.Mount{
 			{
 				Type:     mount.TypeBind,
@@ -97,6 +96,20 @@ func (m *Manager) EnsureTraefik(ctx context.Context) error {
 		return fmt.Errorf("starting traefik container: %w", err)
 	}
 
+	// Verify port bindings took effect (Docker can silently skip bindings on conflict)
+	inspect, inspErr := m.cli.ContainerInspect(ctx, resp.ID)
+	if inspErr == nil && inspect.NetworkSettings != nil {
+		bound := 0
+		for _, bindings := range inspect.NetworkSettings.Ports {
+			bound += len(bindings)
+		}
+		if bound == 0 {
+			log.Printf("Warning: Traefik started but has no port bindings — another process may hold ports 80/443")
+		} else {
+			log.Printf("Traefik port bindings OK (%d bindings)", bound)
+		}
+	}
+
 	log.Printf("Traefik started (container %s)", resp.ID[:12])
 	return nil
 }
@@ -104,7 +117,7 @@ func (m *Manager) EnsureTraefik(ctx context.Context) error {
 // ReconfigureTraefikACME stops and recreates Traefik with Let's Encrypt ACME
 // support enabled.  Called when the first public_direct endpoint is created.
 // Uses HTTP-01 challenge on the existing :80 entrypoint.
-func (m *Manager) ReconfigureTraefikACME(ctx context.Context) error {
+func (m *Manager) ReconfigureTraefikACME(ctx context.Context, publicIP string) error {
 	// Stop existing Traefik
 	id, _, err := m.FindContainerByLabel(ctx, "clank.traefik", "true")
 	if err != nil {
@@ -154,10 +167,7 @@ func (m *Manager) ReconfigureTraefikACME(ctx context.Context) error {
 	}
 
 	hostConfig := &container.HostConfig{
-		PortBindings: nat.PortMap{
-			"80/tcp":  {{HostIP: "", HostPort: "80"}},
-			"443/tcp": {{HostIP: "", HostPort: "443"}},
-		},
+		PortBindings: traefikPortBindings(publicIP),
 		Mounts: []mount.Mount{
 			{
 				Type:     mount.TypeBind,
@@ -190,8 +200,45 @@ func (m *Manager) ReconfigureTraefikACME(ctx context.Context) error {
 		return fmt.Errorf("starting traefik container (ACME): %w", err)
 	}
 
+	// Verify port bindings took effect
+	inspect, inspErr := m.cli.ContainerInspect(ctx, resp.ID)
+	if inspErr == nil && inspect.NetworkSettings != nil {
+		bound := 0
+		for _, bindings := range inspect.NetworkSettings.Ports {
+			bound += len(bindings)
+		}
+		if bound == 0 {
+			log.Printf("Warning: Traefik ACME started but has no port bindings — another process may hold ports 80/443")
+		} else {
+			log.Printf("Traefik ACME port bindings OK (%d bindings)", bound)
+		}
+	}
+
 	log.Printf("Traefik with ACME started (container %s)", resp.ID[:12])
 	return nil
+}
+
+// traefikPortBindings builds port bindings for Traefik.
+// When bindIP is set (e.g. Tailscale conflict), we dual-bind: LAN IP (for
+// external NAT traffic) + 127.0.0.1 (for Tailscale Serve and local health checks).
+// When bindIP is "", we bind to 0.0.0.0 which already includes localhost.
+func traefikPortBindings(bindIP string) nat.PortMap {
+	if bindIP == "" {
+		return nat.PortMap{
+			"80/tcp":  {{HostIP: "", HostPort: "80"}},
+			"443/tcp": {{HostIP: "", HostPort: "443"}},
+		}
+	}
+	return nat.PortMap{
+		"80/tcp": {
+			{HostIP: bindIP, HostPort: "80"},
+			{HostIP: "127.0.0.1", HostPort: "80"},
+		},
+		"443/tcp": {
+			{HostIP: bindIP, HostPort: "443"},
+			{HostIP: "127.0.0.1", HostPort: "443"},
+		},
+	}
 }
 
 // HasACME checks if the running Traefik instance has ACME configured.

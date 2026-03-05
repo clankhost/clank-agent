@@ -39,6 +39,12 @@ type CommandHandler struct {
 	// (stream broke mid-deploy). Drained on the next successful connection.
 	pendingMu      sync.Mutex
 	pendingResults []*clankv1.AgentMessage
+
+	// activeDeploysMu guards activeDeploys — slugs with in-progress or
+	// recently completed deploys. REMOVE commands for these slugs are
+	// skipped to prevent stale cleanup commands from killing containers.
+	activeDeploysMu sync.Mutex
+	activeDeploys   map[string]time.Time // value = expiry time
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
@@ -100,10 +106,59 @@ func (h *CommandHandler) DrainPendingResults(stream grpcclient.ConnectStream) {
 	}
 }
 
+// deployGracePeriod is how long after a successful deploy the slug stays
+// protected from stale REMOVE commands sent by the control plane.
+const deployGracePeriod = 5 * time.Minute
+
+func (h *CommandHandler) markDeployActive(slug string) {
+	h.activeDeploysMu.Lock()
+	defer h.activeDeploysMu.Unlock()
+	if h.activeDeploys == nil {
+		h.activeDeploys = make(map[string]time.Time)
+	}
+	// Use a far-future expiry while deploying; replaced by real expiry on completion.
+	h.activeDeploys[slug] = time.Now().Add(1 * time.Hour)
+}
+
+func (h *CommandHandler) markDeployDone(slug string, success bool) {
+	h.activeDeploysMu.Lock()
+	defer h.activeDeploysMu.Unlock()
+	if success {
+		// Keep protected for grace period after successful deploy.
+		h.activeDeploys[slug] = time.Now().Add(deployGracePeriod)
+		log.Printf("Deploy guard for slug %s extended for %s", slug, deployGracePeriod)
+	} else {
+		delete(h.activeDeploys, slug)
+	}
+}
+
+func (h *CommandHandler) isDeployActive(slug string) bool {
+	h.activeDeploysMu.Lock()
+	defer h.activeDeploysMu.Unlock()
+	expiry, ok := h.activeDeploys[slug]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		delete(h.activeDeploys, slug)
+		return false
+	}
+	return true
+}
+
 // HandleDeploy processes a DeployCommand — clone+build or image pull, then deploy.
 func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.DeployCommand) {
 	deployID := cmd.GetDeploymentId()
-	log.Printf("Handling deploy command for deployment %s (service: %s)", deployID, cmd.GetServiceSlug())
+	slug := cmd.GetServiceSlug()
+	log.Printf("Handling deploy command for deployment %s (service: %s)", deployID, slug)
+
+	// Guard: mark this slug as deploying so concurrent REMOVE commands
+	// don't kill the container while it's still starting up.
+	// On success, the guard extends for deployGracePeriod to absorb
+	// stale REMOVE waves from the control plane.
+	h.markDeployActive(slug)
+	deploySuccess := false
+	defer func() { h.markDeployDone(slug, deploySuccess) }()
 
 	// sendProgress sends intermediate progress updates (no introspection attached).
 	sendProgress := func(status, message, containerID, containerName, imageTag, gitSHA string) {
@@ -271,6 +326,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	if err != nil {
 		sendTerminalProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA, deployResult)
 	} else {
+		deploySuccess = true
 		// The deployer already called onProgress("active", ...) for intermediate
 		// progress. Send a terminal message with introspection attached.
 		// Note: the deployer's onProgress already reported "active" to the stream,
@@ -340,6 +396,28 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 	if err != nil || containerID == "" {
 		// Try by container name directly
 		// For simplicity, we use the container name from the command
+	}
+
+	// Guard: skip REMOVE for slugs with in-progress deploys to avoid
+	// killing a container that's still starting up.
+	if action == clankv1.ContainerCommand_REMOVE {
+		slug := cmd.GetServiceSlug()
+		if slug != "" && h.isDeployActive(slug) {
+			log.Printf("Skipping REMOVE for slug %s — deploy in progress", slug)
+			msg := &clankv1.AgentMessage{
+				Payload: &clankv1.AgentMessage_CommandResult{
+					CommandResult: &clankv1.CommandResult{
+						CommandId: commandID,
+						Success:   true,
+						Output:    fmt.Sprintf("Skipped: deploy in progress for %s", slug),
+					},
+				},
+			}
+			if err := stream.Send(msg); err != nil {
+				log.Printf("Failed to send command result: %v", err)
+			}
+			return
+		}
 	}
 
 	var execErr error
@@ -537,7 +615,8 @@ func (h *CommandHandler) HandleEndpoint(ctx context.Context, stream grpcclient.C
 	if providerName == "public_direct" && cmd.GetAction() == clankv1.EndpointCommand_ENSURE {
 		if !h.docker.HasACME(ctx) {
 			log.Printf("Upgrading Traefik to ACME for public_direct endpoint")
-			if err := h.docker.ReconfigureTraefikACME(ctx); err != nil {
+			netInfo := sysinfo.CollectNetworkInfo()
+			if err := h.docker.ReconfigureTraefikACME(ctx, netInfo.TraefikBindIP()); err != nil {
 				log.Printf("Warning: ACME reconfiguration failed: %v", err)
 			}
 		}

@@ -21,8 +21,10 @@ type imageHandler struct {
 	name            string
 	prefixes        []string
 	inject          func(env map[string]string, resolvedURL, pathPrefix string)
-	startupRetries  int // closed-port retries (0 = use default)
-	startupInterval int // seconds between retries (0 = use default)
+	startupRetries  int     // closed-port retries (0 = use default)
+	startupInterval int     // seconds between retries (0 = use default)
+	minCPU          float64 // minimum CPU cores (0 = no override)
+	minMemoryMB     int     // minimum memory in MB (0 = no override)
 }
 
 var imageHandlers = []imageHandler{
@@ -35,8 +37,10 @@ var imageHandlers = []imageHandler{
 		name:            "openclaw",
 		prefixes:        []string{"alpine/openclaw:", "openclaw/openclaw:", "ghcr.io/openclaw/openclaw:", "coollabsio/openclaw:"},
 		inject:          injectOpenClawEnvVars,
-		startupRetries:  10,
-		startupInterval: 15, // ~150s total — gateway needs ~120s to initialize on low-end machines
+		startupRetries:  12,
+		startupInterval: 15, // ~180s total — gateway needs 90-180s depending on CPU
+		minCPU:          1.0,
+		minMemoryMB:     2048,
 	},
 }
 
@@ -203,6 +207,21 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Runs BEFORE CMD extraction so image handlers can provide default CMDs.
 	injectEndpointEnvVars(opts.Env, opts.ImageTag, opts.Endpoints)
 
+	// Image handlers can specify minimum resource requirements. Upgrade
+	// opts when the handler needs more than the API-supplied defaults.
+	cpuLimit := opts.CPULimit
+	memoryLimitMB := opts.MemoryLimitMB
+	if handler := matchesImageHandler(opts.ImageTag); handler != nil {
+		if handler.minCPU > 0 && handler.minCPU > cpuLimit {
+			log.Printf("Upgrading CPU limit from %.1f to %.1f for %s handler", cpuLimit, handler.minCPU, handler.name)
+			cpuLimit = handler.minCPU
+		}
+		if handler.minMemoryMB > 0 && handler.minMemoryMB > memoryLimitMB {
+			log.Printf("Upgrading memory limit from %dMB to %dMB for %s handler", memoryLimitMB, handler.minMemoryMB, handler.name)
+			memoryLimitMB = handler.minMemoryMB
+		}
+	}
+
 	// Extract CLANK_CONTAINER_CMD magic env var (used as Docker CMD override).
 	var cmdOverride []string
 	if cmdStr, ok := opts.Env["CLANK_CONTAINER_CMD"]; ok && cmdStr != "" {
@@ -220,8 +239,8 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		Labels:        labels,
 		Network:       primaryNetwork,
 		NetworkAlias:  opts.ServiceSlug,
-		CPULimit:      opts.CPULimit,
-		MemoryLimitMB: opts.MemoryLimitMB,
+		CPULimit:      cpuLimit,
+		MemoryLimitMB: memoryLimitMB,
 		Command:       cmdOverride,
 	})
 	if err != nil {
@@ -383,7 +402,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		retries := 3
 		interval := 10
 
-		// Image handlers can specify longer startup timeouts for slow-init apps.
+		// Image handlers know what their image needs for startup and
+		// take priority over API health-check defaults (which govern
+		// HTTP health checks, not port-open probing).
 		if handler := matchesImageHandler(opts.ImageTag); handler != nil {
 			if handler.startupRetries > 0 {
 				retries = handler.startupRetries
@@ -393,13 +414,18 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 			}
 		}
 
-		// User-configured values override handler defaults.
-		if hc.Retries > 0 {
-			retries = hc.Retries
+		// StartupGraceSeconds is the only user-facing knob for startup wait.
+		// If set, add it as initial sleep before probing begins.
+		if hc.StartupGraceSeconds > 0 {
+			log.Printf("Startup grace: waiting %ds before port probing...", hc.StartupGraceSeconds)
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			case <-time.After(time.Duration(hc.StartupGraceSeconds) * time.Second):
+			}
 		}
-		if hc.IntervalSeconds > 0 {
-			interval = hc.IntervalSeconds
-		}
+
+		log.Printf("Port probe config: retries=%d interval=%ds (total ~%ds)", retries, interval, retries*interval)
 		for attempt := 1; attempt <= retries; attempt++ {
 			select {
 			case <-ctx.Done():

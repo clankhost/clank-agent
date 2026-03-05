@@ -83,8 +83,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	// If this fails repeatedly, roll back to the previous binary.
 	a.checkPendingUpdate(ctx)
 
-	// Ensure Traefik is running on this host
-	if err := a.dockerMgr.EnsureTraefik(ctx); err != nil {
+	// Ensure Traefik is running on this host (bind to LAN IP to avoid Tailscale port conflicts)
+	netInfo := sysinfo.CollectNetworkInfo()
+	if err := a.dockerMgr.EnsureTraefik(ctx, netInfo.TraefikBindIP()); err != nil {
 		log.Printf("Warning: could not ensure Traefik is running: %v", err)
 	}
 

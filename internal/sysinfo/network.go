@@ -19,6 +19,21 @@ type NetworkInfo struct {
 	TailscaleCLIAvailable bool
 }
 
+// TraefikBindIP returns the IP address Traefik should bind ports 80/443 to.
+// When Tailscale is present, binding to 0.0.0.0 can fail because tailscaled
+// already holds port 443 on its IP. In that case we bind to the primary
+// LAN IP (the server's main interface), avoiding the conflict.
+// Returns "" when 0.0.0.0 is safe (no Tailscale detected).
+func (n NetworkInfo) TraefikBindIP() string {
+	if n.TailscaleIP == "" {
+		return "" // no Tailscale, 0.0.0.0 is safe
+	}
+	if len(n.LANIPs) > 0 {
+		return n.LANIPs[0] // primary LAN IP, avoids Tailscale conflict
+	}
+	return "" // fallback to 0.0.0.0
+}
+
 // CollectNetworkInfo enumerates LAN IPs, detects public IP, and detects Tailscale.
 func CollectNetworkInfo() NetworkInfo {
 	info := NetworkInfo{}
