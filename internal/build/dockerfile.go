@@ -11,27 +11,86 @@ import (
 
 // Dockerfile templates — ported from apps/api/app/infrastructure/build/dockerfile_generator.py
 
-const nodeSPADockerfile = `FROM node:20-alpine AS build
+// detectPackageManager returns the Node.js package manager based on lockfiles.
+func detectPackageManager(contextPath string) string {
+	if fileExists(filepath.Join(contextPath, "bun.lockb")) || fileExists(filepath.Join(contextPath, "bun.lock")) {
+		return "bun"
+	}
+	if fileExists(filepath.Join(contextPath, "pnpm-lock.yaml")) {
+		return "pnpm"
+	}
+	if fileExists(filepath.Join(contextPath, "yarn.lock")) {
+		return "yarn"
+	}
+	return "npm"
+}
+
+func copyDepsForPM(pm string) string {
+	switch pm {
+	case "pnpm":
+		return "package.json pnpm-lock.yaml* ./"
+	case "yarn":
+		return "package.json yarn.lock* ./"
+	case "bun":
+		return "package.json bun.lockb* ./"
+	default:
+		return "package*.json ./"
+	}
+}
+
+func installCmdForPM(pm string, production bool) string {
+	switch pm {
+	case "pnpm":
+		cmd := "corepack enable && pnpm install --frozen-lockfile"
+		if production {
+			return cmd + " --prod"
+		}
+		return cmd
+	case "yarn":
+		cmd := "yarn install --frozen-lockfile"
+		if production {
+			return cmd + " --production"
+		}
+		return cmd
+	case "bun":
+		cmd := "bun install"
+		if production {
+			return cmd + " --production"
+		}
+		return cmd
+	default:
+		if production {
+			return "npm ci --omit=dev"
+		}
+		return "npm ci"
+	}
+}
+
+func buildNodeSPADockerfile(pm, buildDir string) string {
+	return fmt.Sprintf(`FROM node:20-alpine AS build
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci
+COPY %s
+RUN %s
 COPY . .
-RUN npm run build
+RUN %s run build
 
 FROM nginx:alpine
 COPY --from=build /app/%s /usr/share/nginx/html
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
-`
+`, copyDepsForPM(pm), installCmdForPM(pm, false), pm, buildDir)
+}
 
-const nodeServerDockerfile = `FROM node:20-alpine
+func buildNodeServerDockerfile(pm string, port int) string {
+	return fmt.Sprintf(`FROM node:20-alpine
 WORKDIR /app
-COPY package*.json ./
-RUN npm ci --omit=dev
+COPY %s
+RUN %s
 COPY . .
 EXPOSE %d
-CMD ["npm", "start"]
-`
+CMD ["%s", "start"]
+`, copyDepsForPM(pm), installCmdForPM(pm, true), port, pm)
+}
 
 const pythonRequirementsDockerfile = `FROM python:3.12-slim
 WORKDIR /app
@@ -119,7 +178,8 @@ func detectProject(contextPath string, port int) (string, int, string) {
 		// Node server
 		if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
 			if _, hasStart := scripts["start"]; hasStart {
-				return fmt.Sprintf(nodeServerDockerfile, port), port, "/health"
+				pm := detectPackageManager(contextPath)
+				return buildNodeServerDockerfile(pm, port), port, "/health"
 			}
 		}
 	}
@@ -191,6 +251,8 @@ func detectNodeSPA(contextPath string, pkg map[string]interface{}) (string, int,
 		return "", 0, ""
 	}
 
+	pm := detectPackageManager(contextPath)
+
 	buildDir := "dist"
 	if hasDep(pkg, "next") {
 		buildDir = "out"
@@ -198,7 +260,7 @@ func detectNodeSPA(contextPath string, pkg map[string]interface{}) (string, int,
 		buildDir = "build"
 	}
 
-	return fmt.Sprintf(nodeSPADockerfile, buildDir), 80, "/"
+	return buildNodeSPADockerfile(pm, buildDir), 80, "/"
 }
 
 var appPatternRe = regexp.MustCompile(`(?m)^\s*app\s*=\s*(FastAPI|Flask|Starlette)\(`)
