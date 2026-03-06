@@ -173,21 +173,19 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, c
 		return &PhaseError{Phase: "extract", Err: fmt.Errorf("setting permissions: %w", err)}
 	}
 
-	// 6. Replace the binary by overwriting in-place.
+	// 6. Replace the binary using rename-based approach.
 	//
-	// We cannot use the classic stage-then-rename approach because the agent
-	// runs as the "clank" user which owns the binary file but does NOT have
-	// write permission on the install directory (/usr/local/bin/ is root:root).
-	// Creating new files (.new) or renaming within that directory requires
-	// directory write permission.
+	// We stage the new binary next to the target (e.g. .clank-agent.new),
+	// rename the running binary to .clank-agent.old, then rename the staged
+	// binary into place. This works because os.Rename() modifies directory
+	// entries (not inodes), so it succeeds even while the old binary is
+	// executing. The kernel keeps the old inode alive in memory.
 	//
-	// Instead, we overwrite the existing binary's contents directly. The agent
-	// user can do this because it owns the file. This is non-atomic (a crash
-	// mid-write could corrupt the binary), but the backup in configDir and
-	// systemd restart provide recovery.
-	log.Printf("[update] Overwriting binary at %s", execPath)
-	if err := overwriteFile(newBinaryPath, execPath); err != nil {
-		return &PhaseError{Phase: "replace", Err: fmt.Errorf("overwriting binary: %w", err)}
+	// Requires: the agent user must have write permission on the install
+	// directory (e.g. /opt/clank/bin/ owned by clank:clank).
+	log.Printf("[update] Replacing binary at %s", execPath)
+	if err := replaceFile(newBinaryPath, execPath); err != nil {
+		return &PhaseError{Phase: "replace", Err: fmt.Errorf("replacing binary: %w", err)}
 	}
 
 	log.Printf("[update] Binary replaced at %s", execPath)
@@ -236,9 +234,9 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 
 	// Apply the update
 	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir); err != nil {
-		// Restore backup on failure by overwriting the binary with the backup
+		// Restore backup on failure using rename-based replacement
 		log.Printf("[update] Apply failed, restoring backup: %v", err)
-		if restoreErr := overwriteFile(backupPath, execPath); restoreErr != nil {
+		if restoreErr := replaceFile(backupPath, execPath); restoreErr != nil {
 			log.Printf("[update] WARNING: failed to restore backup: %v", restoreErr)
 		}
 		return err
@@ -265,7 +263,7 @@ func Rollback(configDir string) error {
 	}
 
 	log.Printf("[update] Rolling back to previous binary from %s", backupPath)
-	if err := overwriteFile(backupPath, execPath); err != nil {
+	if err := replaceFile(backupPath, execPath); err != nil {
 		return fmt.Errorf("restoring backup: %w", err)
 	}
 
@@ -369,20 +367,48 @@ func copyFile(src, dst string) error {
 	return err
 }
 
-// overwriteFile replaces the contents of an existing file without creating
-// a new directory entry. This works even when the agent user owns the file
-// but doesn't have write permission on the parent directory.
-func overwriteFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+// replaceFile atomically replaces dst with the contents of src using the
+// rename-based approach. This avoids ETXTBSY on Linux (can't write to a
+// running binary) by only modifying directory entries:
+//
+//  1. Copy src → dst.new  (stage in same directory)
+//  2. Rename dst → dst.old (safe even while dst is executing)
+//  3. Rename dst.new → dst (atomic on same filesystem)
+//  4. Remove dst.old
+//
+// Requires write permission on the parent directory of dst.
+func replaceFile(src, dst string) error {
+	staged := dst + ".new"
+	backup := dst + ".old"
+
+	// 1. Stage new binary next to target
+	if err := copyFile(src, staged); err != nil {
+		return fmt.Errorf("staging new binary: %w", err)
 	}
-	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_TRUNC, 0755)
-	if err != nil {
-		return err
+	if err := os.Chmod(staged, 0755); err != nil {
+		os.Remove(staged)
+		return fmt.Errorf("chmod staged binary: %w", err)
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+
+	// 2. Rename current binary to .old (ok even while running)
+	// Remove any stale .old from a previous failed update
+	os.Remove(backup)
+	if err := os.Rename(dst, backup); err != nil {
+		os.Remove(staged)
+		return fmt.Errorf("rename current to .old: %w", err)
+	}
+
+	// 3. Rename staged binary into place
+	if err := os.Rename(staged, dst); err != nil {
+		// Rollback: restore the old binary
+		if rbErr := os.Rename(backup, dst); rbErr != nil {
+			log.Printf("[update] CRITICAL: rollback also failed: %v", rbErr)
+		}
+		return fmt.Errorf("rename .new into place: %w", err)
+	}
+
+	// 4. Cleanup old binary (best-effort)
+	os.Remove(backup)
+
+	return nil
 }
