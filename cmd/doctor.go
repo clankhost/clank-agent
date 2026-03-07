@@ -36,8 +36,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	runner := doctor.NewRunner()
-	runner.Add("docker", doctor.CheckDockerAvailable)
-	runner.Add("docker_version", doctor.CheckDockerVersion)
+	runner.Add("docker", doctor.CheckDocker)
 	runner.Add("docker_socket", doctor.CheckDockerSocket)
 	runner.Add("docker_group", doctor.CheckDockerGroup)
 	runner.Add("disk_space", doctor.CheckDiskSpace)

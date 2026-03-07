@@ -95,8 +95,8 @@ func HasErrors(results []CheckResult) bool {
 
 // --- Built-in checks ---
 
-// CheckDockerAvailable verifies the Docker daemon is reachable.
-func CheckDockerAvailable() CheckResult {
+// CheckDocker verifies the Docker daemon is reachable and meets the minimum version.
+func CheckDocker() CheckResult {
 	ok, detail := docker.IsDockerAvailable()
 	if !ok {
 		return CheckResult{
@@ -105,29 +105,15 @@ func CheckDockerAvailable() CheckResult {
 			Fix:     "Install Docker Engine: https://docs.docker.com/engine/install/",
 		}
 	}
-	return CheckResult{Status: OK, Message: fmt.Sprintf("Docker %s", detail)}
-}
-
-// CheckDockerVersion warns if Docker is below the minimum supported version.
-func CheckDockerVersion() CheckResult {
-	ok, detail := docker.IsDockerAvailable()
-	if !ok {
-		return CheckResult{Status: Error, Message: "cannot check version: Docker not available"}
-	}
-	// detail is the version string like "24.0.7"
+	// Check minimum version (detail is e.g. "24.0.7")
 	parts := strings.SplitN(detail, ".", 2)
-	if len(parts) < 1 {
-		return CheckResult{Status: Warn, Message: fmt.Sprintf("cannot parse Docker version: %s", detail)}
-	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return CheckResult{Status: Warn, Message: fmt.Sprintf("cannot parse Docker major version: %s", detail)}
-	}
-	if major < 24 {
-		return CheckResult{
-			Status:  Warn,
-			Message: fmt.Sprintf("Docker %s (minimum recommended: 24.x)", detail),
-			Fix:     "Upgrade Docker Engine: https://docs.docker.com/engine/install/",
+	if len(parts) >= 1 {
+		if major, err := strconv.Atoi(parts[0]); err == nil && major < 24 {
+			return CheckResult{
+				Status:  Warn,
+				Message: fmt.Sprintf("Docker %s (minimum recommended: 24.x)", detail),
+				Fix:     "Upgrade Docker Engine: https://docs.docker.com/engine/install/",
+			}
 		}
 	}
 	return CheckResult{Status: OK, Message: fmt.Sprintf("Docker %s", detail)}
@@ -160,16 +146,21 @@ func CheckGRPCConnectivity(endpoint string) CheckResult {
 	if endpoint == "" {
 		return CheckResult{Status: Warn, Message: "no gRPC endpoint configured (not enrolled yet)"}
 	}
-	conn, err := net.DialTimeout("tcp", endpoint, 5*time.Second)
+	// Ensure host:port format — tunnel endpoints may omit port (default 443)
+	target := endpoint
+	if !strings.Contains(target, ":") {
+		target = target + ":443"
+	}
+	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
 	if err != nil {
 		return CheckResult{
 			Status:  Error,
-			Message: fmt.Sprintf("cannot reach %s: %v", endpoint, err),
+			Message: fmt.Sprintf("cannot reach %s: %v", target, err),
 			Fix:     "Check network/firewall — agent needs outbound TCP to the control plane",
 		}
 	}
 	conn.Close()
-	return CheckResult{Status: OK, Message: fmt.Sprintf("reachable: %s", endpoint)}
+	return CheckResult{Status: OK, Message: fmt.Sprintf("reachable: %s", target)}
 }
 
 // CheckDiskSpace warns if free disk space is below 2GB.
