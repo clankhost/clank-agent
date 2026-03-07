@@ -167,10 +167,59 @@ func GenerateDockerfileIfMissing(contextPath, dockerfilePath string, port int) G
 	}
 }
 
+// isDesktopApp checks build script content, config files, and deps to detect
+// desktop/mobile apps (Electron, Tauri, React Native) that can't be served as
+// web applications in Docker.
+func isDesktopApp(contextPath string, pkg map[string]interface{}) bool {
+	// Layer 1: Build script content (most direct — this is what actually fails)
+	if scripts, ok := pkg["scripts"].(map[string]interface{}); ok {
+		if buildScript, ok := scripts["build"].(string); ok {
+			desktopCmds := []string{
+				"electron-builder", "electron-forge", "electron-packager",
+				"tauri build", "react-native bundle", "expo build", "expo export",
+			}
+			for _, cmd := range desktopCmds {
+				if strings.Contains(buildScript, cmd) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Layer 2: Config files (definitive presence)
+	configFiles := []string{
+		"electron-builder.yml", "electron-builder.json5", "electron-builder.json",
+		"forge.config.js", "forge.config.ts", "forge.config.cjs",
+		"tauri.conf.json",
+	}
+	for _, f := range configFiles {
+		if fileExists(filepath.Join(contextPath, f)) {
+			return true
+		}
+	}
+
+	// Layer 3: Dependency names (broadest catch)
+	markers := []string{
+		"electron", "electron-builder", "electron-packager", "@electron-forge/cli",
+		"react-native", "@tauri-apps/cli", "@tauri-apps/api",
+	}
+	for _, m := range markers {
+		if hasDep(pkg, m) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func detectProject(contextPath string, port int) (string, int, string) {
 	// Node.js
 	pkg := readPackageJSON(contextPath)
 	if pkg != nil {
+		// Check for desktop/mobile apps — don't generate a Dockerfile
+		if isDesktopApp(contextPath, pkg) {
+			return "", 0, ""
+		}
 		// SPA first
 		if content, ePort, hPath := detectNodeSPA(contextPath, pkg); content != "" {
 			return content, ePort, hPath
