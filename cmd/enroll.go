@@ -109,7 +109,13 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Enrolled successfully! Server ID: %s\n", resp.ServerId)
 	fmt.Printf("Auth mode: %s\n", authMode)
 	fmt.Printf("Config saved to %s\n", configDir)
-	fmt.Println("Run 'clank-agent run' to start the agent.")
+	fmt.Println("")
+	fmt.Println("The agent is running as a systemd service.")
+	fmt.Println("Restart it to pick up the new config:")
+	fmt.Println("  sudo systemctl restart clank-agent")
+	fmt.Println("")
+	fmt.Println("To watch logs:")
+	fmt.Println("  journalctl -u clank-agent -f")
 	return nil
 }
 
