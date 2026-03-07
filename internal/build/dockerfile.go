@@ -60,9 +60,9 @@ func installCmdForPM(pm string, production bool) string {
 		return cmd
 	default:
 		if production {
-			return "npm ci --omit=dev"
+			return "npm ci --legacy-peer-deps --omit=dev"
 		}
-		return "npm ci"
+		return "npm ci --legacy-peer-deps"
 	}
 }
 
