@@ -20,8 +20,10 @@ func NewBuilder(dm *docker.Manager) *Builder {
 
 // BuildResult contains the output of a successful build.
 type BuildResult struct {
-	ImageTag string
-	GitSHA   string
+	ImageTag      string
+	GitSHA        string
+	EffectivePort int    // 0 = no override (use command port)
+	HealthPath    string // "" = no override (use command health path)
 }
 
 // ProgressFunc is a callback for reporting build progress.
@@ -64,7 +66,9 @@ func (b *Builder) BuildFromSource(
 	}
 
 	return &BuildResult{
-		ImageTag: imageTag,
-		GitSHA:   gitSHA,
+		ImageTag:      imageTag,
+		GitSHA:        gitSHA,
+		EffectivePort: result.EffectivePort,
+		HealthPath:    result.HealthPath,
 	}, nil
 }

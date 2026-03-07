@@ -160,6 +160,10 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	deploySuccess := false
 	defer func() { h.markDeployDone(slug, deploySuccess) }()
 
+	// buildEffectivePort is set after the build phase if the auto-generated
+	// Dockerfile uses a different port than the command specified.
+	var buildEffectivePort int32
+
 	// sendProgress sends intermediate progress updates (no introspection attached).
 	sendProgress := func(status, message, containerID, containerName, imageTag, gitSHA string) {
 		msg := &clankv1.AgentMessage{
@@ -172,6 +176,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 					ContainerName: containerName,
 					ImageTag:      imageTag,
 					GitSha:        gitSHA,
+					EffectivePort: buildEffectivePort,
 				},
 			},
 		}
@@ -256,12 +261,27 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 
 		imageTag = result.ImageTag
 		gitSHA = result.GitSHA
+
+		// Propagate effective port and health path from build detection.
+		// The auto-generated Dockerfile may use a different port than the
+		// command specified (e.g., SPA → nginx on port 80 vs default 8080).
+		if result.EffectivePort > 0 && result.EffectivePort != int(cmd.GetPort()) {
+			log.Printf("[deploy] Build detected effective port %d (was %d)", result.EffectivePort, cmd.GetPort())
+			buildEffectivePort = int32(result.EffectivePort)
+		}
+
 		sendProgress("built", "Build complete", "", "", imageTag, gitSHA)
 	}
 
 	if imageTag == "" {
 		sendProgress("failed", "No image to deploy (no repo_url and no image_tag)", "", "", "", "")
 		return
+	}
+
+	// Determine the deploy port: prefer build-detected port over command port.
+	deployPort := int(cmd.GetPort())
+	if buildEffectivePort > 0 {
+		deployPort = int(buildEffectivePort)
 	}
 
 	// Phase 2: Deploy
@@ -310,7 +330,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		ServiceSlug:     cmd.GetServiceSlug(),
 		ImageTag:        imageTag,
 		Env:             cmd.GetEnvVars(),
-		Port:            int(cmd.GetPort()),
+		Port:            deployPort,
 		Domains:         cmd.GetDomains(),
 		Endpoints:       endpoints,
 		HealthCheckPath: cmd.GetHealthCheckPath(),
