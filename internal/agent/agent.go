@@ -262,7 +262,10 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 // connectivity to the control plane. After 3 failed attempts, it rolls back
 // to the previous binary and exits (systemd restarts with the old version).
 func (a *Agent) checkPendingUpdate(ctx context.Context) {
-	state := selfupdate.LoadState(a.cfgDir)
+	// State and backups live next to the binary (always writable under
+	// systemd sandbox), not in cfgDir which may be read-only.
+	binDir := selfupdate.BinDir()
+	state := selfupdate.LoadState(binDir)
 	if state == nil || state.Status != "pending" {
 		return
 	}
@@ -272,22 +275,22 @@ func (a *Agent) checkPendingUpdate(ctx context.Context) {
 
 	if state.Attempts > 3 {
 		log.Printf("[update] Too many failed startup attempts — rolling back")
-		if err := selfupdate.Rollback(a.cfgDir); err != nil {
+		if err := selfupdate.Rollback(); err != nil {
 			log.Printf("[update] Rollback failed: %v", err)
 		}
-		selfupdate.ClearState(a.cfgDir)
+		selfupdate.ClearState(binDir)
 		log.Printf("[update] Exiting for systemd restart with previous binary")
 		os.Exit(1)
 	}
 
 	// Save incremented attempt count before connectivity test
-	selfupdate.SaveState(a.cfgDir, state)
+	selfupdate.SaveState(binDir, state)
 
 	// Verify we can reach the control plane
 	if a.verifyConnectivity(ctx) {
 		log.Printf("[update] Connectivity verified — update from %s to %s confirmed", state.FromVersion, state.ToVersion)
-		selfupdate.ClearState(a.cfgDir)
-		selfupdate.CleanupBackup(a.cfgDir)
+		selfupdate.ClearState(binDir)
+		selfupdate.CleanupBackup()
 	} else {
 		log.Printf("[update] Connectivity check failed (attempt %d/3)", state.Attempts)
 		// Don't rollback yet — let next restart increment attempts

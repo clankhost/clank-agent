@@ -75,19 +75,29 @@ func isDowngrade(currentVersion, newVersion string) bool {
 	return nPatch < cPatch
 }
 
+// BinDir returns the directory containing the running binary.
+// This is always writable under our systemd sandbox (ReadWritePaths includes
+// /opt/clank/bin) and is used for update backups and state files instead of
+// the config directory, which may reside in a read-only home directory
+// (ProtectHome=read-only).
+func BinDir() string {
+	execPath, err := os.Executable()
+	if err != nil {
+		return os.TempDir()
+	}
+	execPath, _ = filepath.EvalSymlinks(execPath)
+	return filepath.Dir(execPath)
+}
+
 // Apply downloads the new agent binary, verifies its signature and checksum,
 // and replaces the current binary. Returns nil on success — the caller should
 // exit to let systemd restart with the new binary.
-//
-// The configDir (e.g. /etc/clank-agent) is used for staging the new binary
-// before overwriting the target. This avoids creating new files in the install
-// directory (/usr/local/bin) which may not be writable by the agent user.
 //
 // If signature is non-empty and a signing public key is embedded, the archive's
 // ECDSA P-256 signature is verified before proceeding. This prevents supply-chain
 // attacks where a compromised control plane serves a malicious binary with
 // a matching checksum.
-func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir string) error {
+func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -195,9 +205,11 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, c
 // BackupAndApply creates a backup of the current binary before applying
 // the update. If Apply fails, the backup is automatically restored.
 //
-// The backup is stored in configDir (e.g. /etc/clank-agent/) which the
-// agent user owns, avoiding permission issues with /usr/local/bin/.
-func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir string) error {
+// The backup is stored next to the binary (e.g. /opt/clank/bin/) which is
+// always writable under the systemd sandbox. Previous versions stored the
+// backup in the config directory, which could be read-only when the config
+// lives under $HOME with ProtectHome=read-only.
+func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -221,8 +233,9 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving symlinks: %w", err)}
 	}
 
-	// Create backup in the config directory (owned by clank user)
-	backupPath := filepath.Join(configDir, "clank-agent.prev")
+	// Create backup next to the binary (always writable under systemd sandbox)
+	execDir := filepath.Dir(execPath)
+	backupPath := filepath.Join(execDir, "clank-agent.prev")
 	log.Printf("[update] Backing up current binary to %s", backupPath)
 	if err := copyFile(execPath, backupPath); err != nil {
 		return &PhaseError{Phase: "backup", Err: fmt.Errorf("creating backup: %w", err)}
@@ -233,7 +246,7 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 	}
 
 	// Apply the update
-	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion, configDir); err != nil {
+	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion); err != nil {
 		// Restore backup on failure using rename-based replacement
 		log.Printf("[update] Apply failed, restoring backup: %v", err)
 		if restoreErr := replaceFile(backupPath, execPath); restoreErr != nil {
@@ -245,9 +258,9 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 	return nil
 }
 
-// Rollback restores the previous binary from the backup in configDir.
+// Rollback restores the previous binary from the backup next to the current binary.
 // Returns an error if no backup exists.
-func Rollback(configDir string) error {
+func Rollback() error {
 	execPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
@@ -257,7 +270,7 @@ func Rollback(configDir string) error {
 		return fmt.Errorf("resolving symlinks: %w", err)
 	}
 
-	backupPath := filepath.Join(configDir, "clank-agent.prev")
+	backupPath := filepath.Join(filepath.Dir(execPath), "clank-agent.prev")
 	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
 		return fmt.Errorf("no backup found at %s", backupPath)
 	}
@@ -272,8 +285,8 @@ func Rollback(configDir string) error {
 }
 
 // CleanupBackup removes the .prev backup after a successful update.
-func CleanupBackup(configDir string) {
-	backupPath := filepath.Join(configDir, "clank-agent.prev")
+func CleanupBackup() {
+	backupPath := filepath.Join(BinDir(), "clank-agent.prev")
 	os.Remove(backupPath)
 }
 

@@ -21,13 +21,24 @@ type Config struct {
 }
 
 // DefaultConfigDir returns the platform-appropriate config directory.
-// On Linux, prefers /etc/clank-agent if a config already exists there (handles
-// systemd services running as non-root clank user). Falls back to home dir.
+// On Linux, prefers /etc/clank-agent if:
+//  1. A config already exists there (running agent), OR
+//  2. The directory exists (created by install script for enrollment), OR
+//  3. Running as root (enrollment / initial setup)
+//
+// This ensures enrollment writes config to /etc/clank-agent (which is in the
+// systemd ReadWritePaths sandbox) rather than ~/.clank-agent (which is
+// read-only under ProtectHome=read-only).
 func DefaultConfigDir() string {
 	if runtime.GOOS == "linux" {
 		sysDir := "/etc/clank-agent"
 		// If config exists here, use it regardless of UID (systemd runs as clank user)
 		if _, err := os.Stat(filepath.Join(sysDir, "config.yaml")); err == nil {
+			return sysDir
+		}
+		// If the directory exists (created by install script), prefer it for
+		// enrollment even when running as non-root user.
+		if info, err := os.Stat(sysDir); err == nil && info.IsDir() {
 			return sysDir
 		}
 		// Root always uses /etc even if config doesn't exist yet (enrollment)

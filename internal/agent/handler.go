@@ -554,8 +554,11 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 	newVersion := cmd.GetVersion()
 	log.Printf("Self-update: %s → %s", h.currentVersion, newVersion)
 
-	// Write state file before attempting update (for crash recovery)
-	selfupdate.SaveState(h.cfgDir, &selfupdate.UpdateState{
+	// Write state file before attempting update (for crash recovery).
+	// Use the binary directory (always writable under systemd sandbox)
+	// instead of cfgDir which may be in a read-only home directory.
+	binDir := selfupdate.BinDir()
+	selfupdate.SaveState(binDir, &selfupdate.UpdateState{
 		Status:      "pending",
 		FromVersion: h.currentVersion,
 		ToVersion:   newVersion,
@@ -583,7 +586,6 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 			cmd.GetSignature(),
 			h.currentVersion,
 			newVersion,
-			h.cfgDir,
 		)
 
 		if lastErr == nil {
@@ -601,7 +603,7 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 	if lastErr != nil {
 		// Send failure ACK
 		log.Printf("Self-update failed: %v", lastErr)
-		selfupdate.ClearState(h.cfgDir)
+		selfupdate.ClearState(binDir)
 		h.sendUpdateResult(stream, newVersion, false, lastErr)
 		return
 	}
