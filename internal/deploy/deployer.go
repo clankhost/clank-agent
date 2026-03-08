@@ -105,7 +105,8 @@ type DeployOpts struct {
 	CPULimit        float64
 	MemoryLimitMB   int
 	ProjectNetwork  string
-	LANIPs          []string // Agent LAN IPs for sslip.io routing
+	LANIPs          []string             // Agent LAN IPs for sslip.io routing
+	Volumes         []docker.VolumeMount // Persistent volume mounts
 }
 
 // HealthConfig mirrors the proto HealthCheckConfig.
@@ -246,6 +247,14 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		log.Printf("Using CMD override: %v", cmdOverride)
 	}
 
+	// Fix volume ownership for non-root images before starting the container
+	if len(opts.Volumes) > 0 {
+		log.Printf("Ensuring volume ownership for %d mount(s)", len(opts.Volumes))
+		if err := d.docker.EnsureVolumeOwnership(ctx, opts.ImageTag, opts.Volumes); err != nil {
+			log.Printf("Warning: volume ownership fix failed: %v", err)
+		}
+	}
+
 	// Start container on the project network (isolated) with slug alias for DNS
 	containerID, err := d.docker.RunContainer(ctx, docker.RunOpts{
 		Image:         opts.ImageTag,
@@ -258,6 +267,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		CPULimit:      cpuLimit,
 		MemoryLimitMB: memoryLimitMB,
 		Command:       cmdOverride,
+		Volumes:       opts.Volumes,
 	})
 	if err != nil {
 		return result, fmt.Errorf("starting container: %w", err)

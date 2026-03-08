@@ -325,6 +325,15 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		hostIPs = append(hostIPs, netInfo.PublicIP)
 	}
 
+	// Map proto volume mounts to deploy opts
+	var volumes []docker.VolumeMount
+	for _, vm := range cmd.GetVolumeMounts() {
+		volumes = append(volumes, docker.VolumeMount{
+			Name:      vm.GetName(),
+			MountPath: vm.GetMountPath(),
+		})
+	}
+
 	deployResult, err := h.deployer.Deploy(ctx, deploy.DeployOpts{
 		DeploymentID:    deployID,
 		ServiceSlug:     cmd.GetServiceSlug(),
@@ -339,6 +348,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		MemoryLimitMB:   memoryLimitMB,
 		ProjectNetwork:  cmd.GetProjectNetwork(),
 		LANIPs:          hostIPs,
+		Volumes:         volumes,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)
 	})
@@ -516,6 +526,17 @@ func (h *CommandHandler) removeServiceContainers(ctx context.Context, cmd *clank
 
 	// Remove build images (best-effort)
 	h.docker.RemoveImages(ctx, fmt.Sprintf("clank-%s:", slug))
+
+	// Remove Docker volumes if explicitly requested
+	for _, volName := range cmd.GetVolumeNames() {
+		if volName == "" {
+			continue
+		}
+		log.Printf("Removing volume %s for service slug %s", volName, slug)
+		if err := h.docker.RemoveVolume(ctx, volName); err != nil {
+			log.Printf("Warning: failed to remove volume %s: %v", volName, err)
+		}
+	}
 
 	if lastErr != nil {
 		return fmt.Errorf("some containers failed to remove: %w", lastErr)

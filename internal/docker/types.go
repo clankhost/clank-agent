@@ -1,5 +1,11 @@
 package docker
 
+// VolumeMount describes a named Docker volume to mount into a container.
+type VolumeMount struct {
+	Name      string // Docker volume name (stable across redeploys)
+	MountPath string // Absolute path inside the container
+}
+
 // RunOpts configures a container to be started.
 type RunOpts struct {
 	Image         string
@@ -11,7 +17,8 @@ type RunOpts struct {
 	NetworkAlias  string // DNS alias for service discovery on the network
 	CPULimit      float64
 	MemoryLimitMB int
-	Command       []string // Override the image CMD (e.g. via CLANK_CONTAINER_CMD)
+	Command       []string      // Override the image CMD (e.g. via CLANK_CONTAINER_CMD)
+	Volumes       []VolumeMount // Persistent volume mounts
 }
 
 // ContainerInfo describes a running managed container (for heartbeat reporting).

@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
@@ -149,6 +150,19 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 		config.Cmd = opts.Command
 	}
 
+	// Build volume mounts
+	var mounts []mount.Mount
+	for _, vol := range opts.Volumes {
+		if !isValidMountPath(vol.MountPath) {
+			return "", fmt.Errorf("invalid volume mount path: %s", vol.MountPath)
+		}
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: vol.Name,
+			Target: vol.MountPath,
+		})
+	}
+
 	// Security: drop ALL, then add back the Docker-default capabilities minus
 	// the truly dangerous ones (NET_RAW, SYS_CHROOT, AUDIT_WRITE, SETPCAP,
 	// SETFCAP, MKNOD).  This lets most images (wordpress, postgres, etc.)
@@ -156,6 +170,7 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 	hostConfig := &container.HostConfig{
 		Resources:     resources,
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+		Mounts:        mounts,
 		CapDrop:       []string{"ALL"},
 		CapAdd: []string{
 			"CHOWN",
@@ -453,4 +468,101 @@ func (m *Manager) ConnectToNetworkIfNeeded(ctx context.Context, containerID, net
 
 func int64Ptr(v int64) *int64 {
 	return &v
+}
+
+// blockedMountPaths are system paths that must never be volume-mounted.
+var blockedMountPaths = []string{
+	"/var/run", "/proc", "/sys", "/dev", "/etc",
+	"/root", "/boot", "/lib", "/sbin", "/bin",
+}
+
+// isValidMountPath checks that a mount path is absolute and not in the blocked set.
+func isValidMountPath(path string) bool {
+	if !strings.HasPrefix(path, "/") || strings.Contains(path, "..") {
+		return false
+	}
+	for _, blocked := range blockedMountPaths {
+		if path == blocked || strings.HasPrefix(path, blocked+"/") {
+			return false
+		}
+	}
+	return true
+}
+
+// EnsureVolumeOwnership runs an ephemeral init container to chown volume
+// mount paths to the image's default user. This prevents permission errors
+// when Docker creates volumes as root but the image runs as a non-root user.
+// Skips if the image runs as root or has no user set.
+func (m *Manager) EnsureVolumeOwnership(ctx context.Context, imageName string, volumes []VolumeMount) error {
+	if len(volumes) == 0 {
+		return nil
+	}
+
+	// Inspect image to find its default user
+	inspect, _, err := m.cli.ImageInspectWithRaw(ctx, imageName)
+	if err != nil {
+		fmt.Printf("Warning: could not inspect image %s for volume ownership: %v\n", imageName, err)
+		return nil // best-effort — don't block deploy
+	}
+
+	imgUser := inspect.Config.User
+	if imgUser == "" || imgUser == "root" || imgUser == "0" || imgUser == "0:0" {
+		return nil // root user — no chown needed
+	}
+
+	// Build volume mounts for the init container
+	var initMounts []mount.Mount
+	var mountPaths []string
+	for _, vol := range volumes {
+		initMounts = append(initMounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: vol.Name,
+			Target: vol.MountPath,
+		})
+		mountPaths = append(mountPaths, vol.MountPath)
+	}
+
+	chownCmd := fmt.Sprintf("chown -R %s %s", imgUser, strings.Join(mountPaths, " "))
+	initName := fmt.Sprintf("clank-vol-init-%d", os.Getpid())
+
+	resp, err := m.cli.ContainerCreate(ctx, &container.Config{
+		Image:      imageName,
+		Entrypoint: []string{"/bin/sh", "-c", chownCmd},
+		User:       "root",
+	}, &container.HostConfig{
+		Mounts: initMounts,
+	}, nil, nil, initName)
+	if err != nil {
+		fmt.Printf("Warning: failed to create volume init container: %v\n", err)
+		return nil
+	}
+
+	if err := m.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		_ = m.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		fmt.Printf("Warning: failed to start volume init container: %v\n", err)
+		return nil
+	}
+
+	// Wait for the init container to finish
+	statusCh, errCh := m.cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			fmt.Printf("Warning: volume init container error: %v\n", err)
+		}
+	case status := <-statusCh:
+		if status.StatusCode != 0 {
+			fmt.Printf("Warning: volume init container exited with code %d\n", status.StatusCode)
+		}
+	}
+
+	// Remove the init container
+	_ = m.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+	fmt.Printf("Volume ownership fixed for user %s on %d mount(s)\n", imgUser, len(volumes))
+	return nil
+}
+
+// RemoveVolume removes a named Docker volume by name.
+func (m *Manager) RemoveVolume(ctx context.Context, name string) error {
+	return m.cli.VolumeRemove(ctx, name, false)
 }
