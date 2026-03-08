@@ -263,7 +263,11 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		return result, fmt.Errorf("starting container: %w", err)
 	}
 
-	log.Printf("Container %s started on network %s (%s)", containerName, primaryNetwork, containerID[:12])
+	if opts.ProjectNetwork != "" {
+		log.Printf("Container %s started on isolated project network %s (%s)", containerName, primaryNetwork, containerID[:12])
+	} else {
+		log.Printf("Container %s started on shared network %s (no project network set) (%s)", containerName, primaryNetwork, containerID[:12])
+	}
 
 	// Connect Traefik to the project network so it can route to this container
 	if opts.ProjectNetwork != "" {
