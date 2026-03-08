@@ -118,12 +118,21 @@ func (m *Manager) EnsureTraefik(ctx context.Context, publicIP string) error {
 // support enabled.  Called when the first public_direct endpoint is created.
 // Uses HTTP-01 challenge on the existing :80 entrypoint.
 func (m *Manager) ReconfigureTraefikACME(ctx context.Context, publicIP string) error {
-	// Stop existing Traefik
+	// Inspect existing Traefik to preserve its network memberships
+	var extraNetworks []string
 	id, _, err := m.FindContainerByLabel(ctx, "clank.traefik", "true")
 	if err != nil {
 		return fmt.Errorf("checking for traefik: %w", err)
 	}
 	if id != "" {
+		inspect, inspErr := m.cli.ContainerInspect(ctx, id)
+		if inspErr == nil && inspect.NetworkSettings != nil {
+			for netName := range inspect.NetworkSettings.Networks {
+				if netName != servicesNetwork {
+					extraNetworks = append(extraNetworks, netName)
+				}
+			}
+		}
 		log.Println("Stopping Traefik for ACME reconfiguration...")
 		if err := m.StopAndRemove(ctx, id); err != nil {
 			return fmt.Errorf("stopping traefik: %w", err)
@@ -215,6 +224,16 @@ func (m *Manager) ReconfigureTraefikACME(ctx context.Context, publicIP string) e
 	}
 
 	log.Printf("Traefik with ACME started (container %s)", resp.ID[:12])
+
+	// Reconnect to project networks the old Traefik was on (e.g. clank-project-*)
+	for _, netName := range extraNetworks {
+		if err := m.ConnectToNetworkIfNeeded(ctx, resp.ID, netName); err != nil {
+			log.Printf("Warning: failed to reconnect Traefik to network %s: %v", netName, err)
+		} else {
+			log.Printf("Reconnected Traefik to network %s", netName)
+		}
+	}
+
 	return nil
 }
 
