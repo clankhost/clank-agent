@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"runtime"
 	"time"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
 	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
 )
 
 const (
@@ -72,6 +77,7 @@ func (c *Collector) Run(ctx context.Context) {
 
 	// Collect once immediately
 	c.collect(ctx)
+	c.collectHost(ctx)
 
 	ticker := time.NewTicker(collectInterval)
 	defer ticker.Stop()
@@ -83,6 +89,7 @@ func (c *Collector) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.collect(ctx)
+			c.collectHost(ctx)
 		}
 	}
 }
@@ -165,6 +172,99 @@ func (c *Collector) collect(ctx context.Context) {
 	case c.outCh <- batch:
 	default:
 		log.Printf("[metrics] Dropped batch (%d metrics) due to backpressure", len(metrics))
+	}
+}
+
+func copyLabels(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+// collectHost gathers host-level metrics (CPU, memory, disk, I/O) using gopsutil.
+func (c *Collector) collectHost(ctx context.Context) {
+	now := time.Now().UnixNano()
+	baseLabels := map[string]string{
+		"server_id": c.serverID,
+	}
+	var metrics []*clankv1.Metric
+
+	// CPU times (aggregated across all CPUs)
+	if times, err := cpu.TimesWithContext(ctx, false); err == nil && len(times) > 0 {
+		t := times[0]
+		for mode, val := range map[string]float64{
+			"user":    t.User,
+			"system":  t.System,
+			"idle":    t.Idle,
+			"iowait":  t.Iowait,
+			"nice":    t.Nice,
+			"irq":     t.Irq,
+			"softirq": t.Softirq,
+			"steal":   t.Steal,
+		} {
+			ml := copyLabels(baseLabels)
+			ml["mode"] = mode
+			metrics = append(metrics, &clankv1.Metric{
+				Name: "node_cpu_seconds_total", Value: val,
+				TimestampNs: now, Labels: ml,
+			})
+		}
+	}
+
+	// Load averages (Linux/macOS only; gracefully skipped on Windows)
+	if avg, err := load.AvgWithContext(ctx); err == nil {
+		metrics = append(metrics,
+			&clankv1.Metric{Name: "node_load1", Value: avg.Load1, TimestampNs: now, Labels: copyLabels(baseLabels)},
+			&clankv1.Metric{Name: "node_load5", Value: avg.Load5, TimestampNs: now, Labels: copyLabels(baseLabels)},
+			&clankv1.Metric{Name: "node_load15", Value: avg.Load15, TimestampNs: now, Labels: copyLabels(baseLabels)},
+		)
+	}
+
+	// Memory
+	if vm, err := mem.VirtualMemoryWithContext(ctx); err == nil {
+		metrics = append(metrics,
+			&clankv1.Metric{Name: "node_memory_MemTotal_bytes", Value: float64(vm.Total), TimestampNs: now, Labels: copyLabels(baseLabels)},
+			&clankv1.Metric{Name: "node_memory_MemAvailable_bytes", Value: float64(vm.Available), TimestampNs: now, Labels: copyLabels(baseLabels)},
+		)
+	}
+
+	// Filesystem (root mount)
+	rootPath := "/"
+	if runtime.GOOS == "windows" {
+		rootPath = "C:\\"
+	}
+	if du, err := disk.UsageWithContext(ctx, rootPath); err == nil {
+		fsLabels := copyLabels(baseLabels)
+		fsLabels["mountpoint"] = rootPath
+		metrics = append(metrics,
+			&clankv1.Metric{Name: "node_filesystem_size_bytes", Value: float64(du.Total), TimestampNs: now, Labels: fsLabels},
+			&clankv1.Metric{Name: "node_filesystem_avail_bytes", Value: float64(du.Free), TimestampNs: now, Labels: fsLabels},
+		)
+	}
+
+	// Disk I/O
+	if ioCounters, err := disk.IOCountersWithContext(ctx); err == nil {
+		for device, io := range ioCounters {
+			dl := copyLabels(baseLabels)
+			dl["device"] = device
+			metrics = append(metrics,
+				&clankv1.Metric{Name: "node_disk_read_bytes_total", Value: float64(io.ReadBytes), TimestampNs: now, Labels: dl},
+				&clankv1.Metric{Name: "node_disk_written_bytes_total", Value: float64(io.WriteBytes), TimestampNs: now, Labels: dl},
+			)
+		}
+	}
+
+	if len(metrics) == 0 {
+		return
+	}
+
+	batch := &clankv1.MetricBatch{Metrics: metrics}
+	select {
+	case c.outCh <- batch:
+	default:
+		log.Printf("[metrics] Dropped host batch (%d metrics) due to backpressure", len(metrics))
 	}
 }
 
