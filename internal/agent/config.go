@@ -21,27 +21,38 @@ type Config struct {
 }
 
 // DefaultConfigDir returns the platform-appropriate config directory.
-// On Linux, prefers /etc/clank-agent if:
-//  1. A config already exists there (running agent), OR
-//  2. The directory exists (created by install script for enrollment), OR
-//  3. Running as root (enrollment / initial setup)
+// On Linux, checks these locations in order:
+//  1. /etc/clank-agent/config.yaml exists → use /etc/clank-agent
+//  2. ~/.clank-agent/config.yaml exists → use ~/.clank-agent (backward compat)
+//  3. /etc/clank-agent/ dir exists (no config yet) → use it for enrollment
+//  4. Running as root → use /etc/clank-agent
+//  5. Fallback → ~/.clank-agent
 //
-// This ensures enrollment writes config to /etc/clank-agent (which is in the
+// Step 3 ensures new enrollments write to /etc/clank-agent (which is in the
 // systemd ReadWritePaths sandbox) rather than ~/.clank-agent (which is
-// read-only under ProtectHome=read-only).
+// read-only under ProtectHome=read-only). Step 2 preserves backward
+// compatibility with servers that already have config in the home dir.
 func DefaultConfigDir() string {
 	if runtime.GOOS == "linux" {
 		sysDir := "/etc/clank-agent"
-		// If config exists here, use it regardless of UID (systemd runs as clank user)
+		// If config exists in /etc, use it (preferred location)
 		if _, err := os.Stat(filepath.Join(sysDir, "config.yaml")); err == nil {
 			return sysDir
 		}
-		// If the directory exists (created by install script), prefer it for
-		// enrollment even when running as non-root user.
+		// If config exists in home dir, use it (backward compat for existing installs)
+		home, homeErr := os.UserHomeDir()
+		if homeErr == nil {
+			homeDir := filepath.Join(home, ".clank-agent")
+			if _, err := os.Stat(filepath.Join(homeDir, "config.yaml")); err == nil {
+				return homeDir
+			}
+		}
+		// No config anywhere yet — if /etc/clank-agent dir exists (created by
+		// install script), prefer it for enrollment even as non-root user.
 		if info, err := os.Stat(sysDir); err == nil && info.IsDir() {
 			return sysDir
 		}
-		// Root always uses /etc even if config doesn't exist yet (enrollment)
+		// Root always uses /etc even if dir doesn't exist yet
 		if os.Getuid() == 0 {
 			return sysDir
 		}
