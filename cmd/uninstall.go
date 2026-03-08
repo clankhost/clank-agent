@@ -31,7 +31,6 @@ const (
 	serviceFile = "/etc/systemd/system/clank-agent.service"
 	installDir  = "/opt/clank"
 	symlinkPath = "/usr/local/bin/clank-agent"
-	systemUser  = "clank"
 )
 
 func runUninstall(cmd *cobra.Command, args []string) error {
