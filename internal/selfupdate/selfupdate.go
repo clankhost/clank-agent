@@ -81,12 +81,28 @@ func isDowngrade(currentVersion, newVersion string) bool {
 // the config directory, which may reside in a read-only home directory
 // (ProtectHome=read-only).
 func BinDir() string {
-	execPath, err := os.Executable()
+	execPath, err := resolveExecPath()
 	if err != nil {
 		return os.TempDir()
 	}
-	execPath, _ = filepath.EvalSymlinks(execPath)
 	return filepath.Dir(execPath)
+}
+
+// resolveExecPath returns the current binary's real path, resolving symlinks
+// when possible. Falls back to the raw os.Executable() path if EvalSymlinks
+// fails (e.g. after a previous update renamed/deleted the original file,
+// leaving /proc/self/exe pointing at a deleted ".old" path).
+func resolveExecPath() (string, error) {
+	execPath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(execPath)
+	if err != nil {
+		log.Printf("[update] EvalSymlinks(%s) failed: %v, using raw path", execPath, err)
+		return execPath, nil
+	}
+	return resolved, nil
 }
 
 // Apply downloads the new agent binary, verifies its signature and checksum,
@@ -116,13 +132,9 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 	log.Printf("[update] Updating from %s to %s", currentVersion, newVersion)
 
 	// 1. Determine current binary path
-	execPath, err := os.Executable()
+	execPath, err := resolveExecPath()
 	if err != nil {
 		return &PhaseError{Phase: "replace", Err: fmt.Errorf("resolving executable path: %w", err)}
-	}
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		return &PhaseError{Phase: "replace", Err: fmt.Errorf("resolving symlinks: %w", err)}
 	}
 
 	// 2. Download archive to temp dir
@@ -224,13 +236,9 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 		}
 	}
 
-	execPath, err := os.Executable()
+	execPath, err := resolveExecPath()
 	if err != nil {
 		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving executable path: %w", err)}
-	}
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving symlinks: %w", err)}
 	}
 
 	// Create backup next to the binary (always writable under systemd sandbox)
@@ -261,13 +269,9 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 // Rollback restores the previous binary from the backup next to the current binary.
 // Returns an error if no backup exists.
 func Rollback() error {
-	execPath, err := os.Executable()
+	execPath, err := resolveExecPath()
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
-	}
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		return fmt.Errorf("resolving symlinks: %w", err)
 	}
 
 	backupPath := filepath.Join(filepath.Dir(execPath), "clank-agent.prev")
