@@ -31,17 +31,25 @@ func CloneRepo(ctx context.Context, repoURL, branch, gitToken string) (cloneDir 
 
 	// Use GIT_ASKPASS to supply credentials without exposing the token
 	// in the process argument list (/proc/<pid>/cmdline).
-	if gitToken != "" && strings.Contains(repoURL, "github.com") {
+	if gitToken != "" {
 		askpassScript, cleanupAskpass, askErr := writeAskpassHelper(gitToken)
 		if askErr != nil {
 			os.RemoveAll(cloneDir)
 			return "", "", fmt.Errorf("creating askpass helper: %w", askErr)
 		}
 		defer cleanupAskpass()
+
+		// Provider-specific git username
+		gitUsername := "x-access-token" // GitHub default
+		if strings.Contains(repoURL, "gitlab.com") {
+			gitUsername = "oauth2"
+		} else if strings.Contains(repoURL, "bitbucket.org") {
+			gitUsername = "x-token-auth"
+		}
+
 		cmd.Env = append(cmd.Env,
 			"GIT_ASKPASS="+askpassScript,
-			// Tell git to use x-access-token as the username
-			"GIT_USERNAME=x-access-token",
+			"GIT_USERNAME="+gitUsername,
 		)
 	}
 
