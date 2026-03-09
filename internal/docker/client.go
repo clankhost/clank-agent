@@ -591,12 +591,9 @@ func (m *Manager) DiskUsage(ctx context.Context) (*DiskUsageResult, error) {
 		return nil, fmt.Errorf("docker disk usage: %w", err)
 	}
 
-	var imagesBytes int64
-	for _, img := range du.Images {
-		if img != nil {
-			imagesBytes += img.Size
-		}
-	}
+	// Use LayersSize for deduplicated total — summing individual image sizes
+	// double-counts shared layers and can exceed actual disk usage.
+	imagesBytes := du.LayersSize
 
 	var containersBytes int64
 	for _, c := range du.Containers {
