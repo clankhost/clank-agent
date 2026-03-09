@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	collectInterval = 60 * time.Second
-	channelSize     = 64
+	collectInterval     = 60 * time.Second
+	diskUsageInterval   = 5 * time.Minute
+	channelSize         = 64
 )
 
 // dockerStats mirrors the JSON structure returned by Docker stats API.
@@ -78,9 +79,12 @@ func (c *Collector) Run(ctx context.Context) {
 	// Collect once immediately
 	c.collect(ctx)
 	c.collectHost(ctx)
+	c.collectDiskUsage(ctx)
 
 	ticker := time.NewTicker(collectInterval)
+	diskTicker := time.NewTicker(diskUsageInterval)
 	defer ticker.Stop()
+	defer diskTicker.Stop()
 
 	for {
 		select {
@@ -90,6 +94,8 @@ func (c *Collector) Run(ctx context.Context) {
 		case <-ticker.C:
 			c.collect(ctx)
 			c.collectHost(ctx)
+		case <-diskTicker.C:
+			c.collectDiskUsage(ctx)
 		}
 	}
 }
@@ -265,6 +271,49 @@ func (c *Collector) collectHost(ctx context.Context) {
 	case c.outCh <- batch:
 	default:
 		log.Printf("[metrics] Dropped host batch (%d metrics) due to backpressure", len(metrics))
+	}
+}
+
+// collectDiskUsage calls Docker's /system/df endpoint to gather disk
+// consumption broken down by images, build cache, container layers, and
+// individual volumes.  Runs on a slower cadence (5 min) because the API
+// call can be expensive.
+func (c *Collector) collectDiskUsage(ctx context.Context) {
+	duCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	du, err := c.docker.DiskUsage(duCtx)
+	if err != nil {
+		log.Printf("[metrics] Error collecting disk usage: %v", err)
+		return
+	}
+
+	now := time.Now().UnixNano()
+	baseLabels := map[string]string{"server_id": c.serverID}
+	var metrics []*clankv1.Metric
+
+	metrics = append(metrics,
+		&clankv1.Metric{Name: "docker_disk_images_bytes", Value: float64(du.ImagesBytes), TimestampNs: now, Labels: copyLabels(baseLabels)},
+		&clankv1.Metric{Name: "docker_disk_buildcache_bytes", Value: float64(du.BuildCacheBytes), TimestampNs: now, Labels: copyLabels(baseLabels)},
+		&clankv1.Metric{Name: "docker_disk_containers_bytes", Value: float64(du.ContainersBytes), TimestampNs: now, Labels: copyLabels(baseLabels)},
+	)
+
+	for _, vol := range du.Volumes {
+		vl := copyLabels(baseLabels)
+		vl["volume_name"] = vol.Name
+		metrics = append(metrics, &clankv1.Metric{
+			Name:        "docker_volume_size_bytes",
+			Value:       float64(vol.SizeBytes),
+			TimestampNs: now,
+			Labels:      vl,
+		})
+	}
+
+	batch := &clankv1.MetricBatch{Metrics: metrics}
+	select {
+	case c.outCh <- batch:
+	default:
+		log.Printf("[metrics] Dropped disk usage batch (%d metrics)", len(metrics))
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 
+	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -565,4 +566,68 @@ func (m *Manager) EnsureVolumeOwnership(ctx context.Context, imageName string, v
 // RemoveVolume removes a named Docker volume by name.
 func (m *Manager) RemoveVolume(ctx context.Context, name string) error {
 	return m.cli.VolumeRemove(ctx, name, false)
+}
+
+// VolumeUsage holds the name and disk consumption of a single Docker volume.
+type VolumeUsage struct {
+	Name      string
+	SizeBytes int64
+}
+
+// DiskUsageResult summarises Docker disk consumption by category.
+type DiskUsageResult struct {
+	ImagesBytes     int64
+	BuildCacheBytes int64
+	ContainersBytes int64
+	Volumes         []VolumeUsage
+}
+
+// DiskUsage calls the Docker /system/df endpoint and returns an aggregate
+// breakdown of disk consumed by images, build cache, container writable layers,
+// and per-volume sizes.
+func (m *Manager) DiskUsage(ctx context.Context) (*DiskUsageResult, error) {
+	du, err := m.cli.DiskUsage(ctx, dockertypes.DiskUsageOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("docker disk usage: %w", err)
+	}
+
+	var imagesBytes int64
+	for _, img := range du.Images {
+		if img != nil {
+			imagesBytes += img.Size
+		}
+	}
+
+	var containersBytes int64
+	for _, c := range du.Containers {
+		if c != nil {
+			containersBytes += c.SizeRw
+		}
+	}
+
+	var buildCacheBytes int64
+	for _, bc := range du.BuildCache {
+		if bc != nil {
+			buildCacheBytes += bc.Size
+		}
+	}
+
+	var volumes []VolumeUsage
+	for _, v := range du.Volumes {
+		if v == nil {
+			continue
+		}
+		size := int64(0)
+		if v.UsageData != nil && v.UsageData.Size >= 0 {
+			size = v.UsageData.Size
+		}
+		volumes = append(volumes, VolumeUsage{Name: v.Name, SizeBytes: size})
+	}
+
+	return &DiskUsageResult{
+		ImagesBytes:     imagesBytes,
+		BuildCacheBytes: buildCacheBytes,
+		ContainersBytes: containersBytes,
+		Volumes:         volumes,
+	}, nil
 }
