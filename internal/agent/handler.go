@@ -14,6 +14,7 @@ import (
 	"github.com/anaremore/clank/apps/agent/internal/docker"
 	"github.com/anaremore/clank/apps/agent/internal/endpoint"
 	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
+	"github.com/anaremore/clank/apps/agent/internal/logs"
 	"github.com/anaremore/clank/apps/agent/internal/selfupdate"
 	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
 )
@@ -34,6 +35,7 @@ type CommandHandler struct {
 	cfg            *Config
 	cfgDir         string
 	currentVersion string
+	logCollector   *logs.Collector
 
 	// pendingResults holds deploy progress messages whose Send failed
 	// (stream broke mid-deploy). Drained on the next successful connection.
@@ -48,7 +50,7 @@ type CommandHandler struct {
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
-func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string, version string) *CommandHandler {
+func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string, version string, lc *logs.Collector) *CommandHandler {
 	// Initialize endpoint providers
 	epMgr := endpoint.NewManager(
 		&endpoint.LANProvider{},
@@ -66,6 +68,7 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 		cfg:            cfg,
 		cfgDir:         cfgDir,
 		currentVersion: version,
+		logCollector:   lc,
 	}
 }
 
@@ -234,6 +237,19 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		}
 	}
 
+	// buildLog injects a build/deploy log line into the StreamLogs channel
+	// so it appears in the UI in real-time.
+	buildLog := func(line string) {
+		if h.logCollector != nil {
+			h.logCollector.Inject(&clankv1.LogEntry{
+				DeploymentId: deployID,
+				Line:         line,
+				TimestampNs:  time.Now().UnixNano(),
+				Stream:       "build",
+			})
+		}
+	}
+
 	imageTag := cmd.GetImageTag()
 	var gitSHA string
 
@@ -253,6 +269,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 			func(status, message string) {
 				sendProgress(status, message, "", "", "", "")
 			},
+			buildLog,
 		)
 		if err != nil {
 			sendProgress("build_failed", fmt.Sprintf("Build failed: %v", err), "", "", "", "")
@@ -349,6 +366,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		ProjectNetwork:  cmd.GetProjectNetwork(),
 		LANIPs:          hostIPs,
 		Volumes:         volumes,
+		OnLog:           buildLog,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)
 	})

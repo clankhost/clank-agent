@@ -31,21 +31,34 @@ type ProgressFunc func(status, message string)
 
 // BuildFromSource clones a repo, auto-generates a Dockerfile if needed,
 // builds the Docker image, and returns the result.
+// onLog streams individual build log lines (may be nil).
 func (b *Builder) BuildFromSource(
 	ctx context.Context,
 	repoURL, branch, gitToken, dockerfilePath, serviceSlug, deploymentID string,
 	port int,
 	onProgress ProgressFunc,
+	onLog func(string),
 ) (*BuildResult, error) {
 	// Step 1: Clone
-	onProgress("cloning", fmt.Sprintf("Cloning %s (branch: %s)...", repoURL, branch))
+	cloneMsg := fmt.Sprintf("Cloning %s (branch: %s)...", repoURL, branch)
+	onProgress("cloning", cloneMsg)
+	if onLog != nil {
+		onLog(cloneMsg)
+	}
 	cloneDir, gitSHA, err := CloneRepo(ctx, repoURL, branch, gitToken)
 	if err != nil {
+		if onLog != nil {
+			onLog(fmt.Sprintf("Clone failed: %v", err))
+		}
 		return nil, fmt.Errorf("clone failed: %w", err)
 	}
 	defer CleanupCloneDir(cloneDir)
 
-	onProgress("building", fmt.Sprintf("Cloned at %s, starting build...", gitSHA[:8]))
+	buildMsg := fmt.Sprintf("Cloned at %s, starting build...", gitSHA[:8])
+	onProgress("building", buildMsg)
+	if onLog != nil {
+		onLog(buildMsg)
+	}
 
 	// Step 2: Auto-generate Dockerfile if missing
 	if dockerfilePath == "" {
@@ -53,16 +66,33 @@ func (b *Builder) BuildFromSource(
 	}
 	result := GenerateDockerfileIfMissing(cloneDir, dockerfilePath, port)
 	if result.Generated {
-		log.Printf("Auto-generated Dockerfile (port=%d, health=%s)", result.EffectivePort, result.HealthPath)
+		genMsg := fmt.Sprintf("Auto-generated Dockerfile (port=%d, health=%s)", result.EffectivePort, result.HealthPath)
+		log.Print(genMsg)
+		if onLog != nil {
+			onLog(genMsg)
+		}
 	}
 
 	// Step 3: Build image
 	imageTag := fmt.Sprintf("clank-%s:%s", serviceSlug, deploymentID[:12])
+	if onLog != nil {
+		onLog(fmt.Sprintf("Building image %s...", imageTag))
+	}
 	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, func(msg string) {
 		log.Printf("  [build] %s", msg)
+		if onLog != nil {
+			onLog(msg)
+		}
 	})
 	if err != nil {
+		if onLog != nil {
+			onLog(fmt.Sprintf("Build failed: %v", err))
+		}
 		return nil, fmt.Errorf("docker build failed: %w", err)
+	}
+
+	if onLog != nil {
+		onLog("Build complete")
 	}
 
 	return &BuildResult{

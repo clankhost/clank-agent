@@ -107,6 +107,7 @@ type DeployOpts struct {
 	ProjectNetwork  string
 	LANIPs          []string             // Agent LAN IPs for sslip.io routing
 	Volumes         []docker.VolumeMount // Persistent volume mounts
+	OnLog           func(string)         // Optional: streams deploy log lines to UI
 }
 
 // HealthConfig mirrors the proto HealthCheckConfig.
@@ -162,10 +163,19 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// Pull image if not locally built
 	if opts.ImageTag != "" && !strings.HasPrefix(opts.ImageTag, "clank-") {
+		if opts.OnLog != nil {
+			opts.OnLog(fmt.Sprintf("Pulling image %s...", opts.ImageTag))
+		}
 		if err := d.docker.PullImage(ctx, opts.ImageTag, func(msg string) {
 			log.Printf("  [pull] %s", msg)
+			if opts.OnLog != nil {
+				opts.OnLog(msg)
+			}
 		}); err != nil {
 			return result, fmt.Errorf("pulling image: %w", err)
+		}
+		if opts.OnLog != nil {
+			opts.OnLog("Image pulled successfully")
 		}
 	}
 
@@ -325,6 +335,9 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	onProgress("health_checking", "Container started, running health checks...", containerID[:12], containerName)
+	if opts.OnLog != nil {
+		opts.OnLog(fmt.Sprintf("Container %s started, running health checks...", containerName))
+	}
 
 	// Get container IP for health checks and probing
 	ip, err := d.docker.GetContainerIP(ctx, containerID, primaryNetwork)
@@ -401,7 +414,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// If health check path is explicitly set, use existing behavior
 	if hc.Path != "" {
-		return d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress)
+		return d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress, opts.OnLog)
 	}
 
 	// No explicit path — use smart detection
@@ -411,7 +424,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		if autoPath != "" {
 			log.Printf("Auto-detected health path: %s", autoPath)
 			hc.Path = autoPath
-			return d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress)
+			return d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress, opts.OnLog)
 		}
 		// HTTP but no health path found — consider alive if port responds
 		log.Println("HTTP port responding, no health path found — marking active")
@@ -497,6 +510,7 @@ func (d *Deployer) runHTTPHealthChecks(
 	port int,
 	hc HealthConfig,
 	onProgress ProgressFunc,
+	onLog func(string),
 ) (*DeployResult, error) {
 	if hc.Retries <= 0 {
 		hc.Retries = 3
@@ -521,14 +535,23 @@ func (d *Deployer) runHTTPHealthChecks(
 	healthURL := fmt.Sprintf("http://%s:%d%s", ip, port, hc.Path)
 
 	for attempt := 1; attempt <= hc.Retries; attempt++ {
+		if onLog != nil {
+			onLog(fmt.Sprintf("Health check %s attempt %d/%d...", hc.Path, attempt, hc.Retries))
+		}
 		healthy := checkHTTPHealth(healthURL, hc.TimeoutSeconds)
 		if healthy {
 			log.Printf("Health check passed on attempt %d", attempt)
+			if onLog != nil {
+				onLog(fmt.Sprintf("Health check passed (attempt %d)", attempt))
+			}
 			onProgress("active", fmt.Sprintf("Health check passed (attempt %d)", attempt), containerID[:12], containerName)
 			return result, nil
 		}
 
 		log.Printf("Health check failed (attempt %d/%d)", attempt, hc.Retries)
+		if onLog != nil {
+			onLog(fmt.Sprintf("Health check failed (attempt %d/%d)", attempt, hc.Retries))
+		}
 		if attempt < hc.Retries {
 			select {
 			case <-ctx.Done():

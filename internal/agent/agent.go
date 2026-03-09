@@ -57,9 +57,9 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 
 	b := build.NewBuilder(dockerMgr)
 	d := deploy.NewDeployer(dockerMgr)
-	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgDir, agentVersion)
 	lc := logs.NewCollector(dockerMgr)
 	mc := metrics.NewCollector(dockerMgr, cfg.ServerID)
+	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgDir, agentVersion, lc)
 
 	return &Agent{
 		cfg:          cfg,

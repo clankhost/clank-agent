@@ -43,6 +43,20 @@ func (c *Collector) Entries() <-chan *clankv1.LogEntry {
 	return c.outCh
 }
 
+// Inject sends a log entry directly into the collector's output channel.
+// Used by the build pipeline to stream build logs through the same
+// gRPC StreamLogs infrastructure as runtime container logs.
+// Non-blocking: drops the entry if the channel is full.
+func (c *Collector) Inject(entry *clankv1.LogEntry) {
+	select {
+	case c.outCh <- entry:
+	default:
+		c.mu.Lock()
+		c.dropped++
+		c.mu.Unlock()
+	}
+}
+
 // Run starts the reconciliation loop. It watches for new and removed
 // containers, starting/stopping tailers accordingly. Blocks until ctx is done.
 func (c *Collector) Run(ctx context.Context) {
