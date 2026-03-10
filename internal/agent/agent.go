@@ -183,6 +183,7 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 		OnTunnelConfig:     a.handler.HandleTunnelConfig,
 		OnUpdate:           a.handler.HandleUpdate,
 		OnEndpoint:         a.handler.HandleEndpoint,
+		OnBackup:           a.handler.HandleBackup,
 	}
 	go func() {
 		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)

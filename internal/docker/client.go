@@ -405,6 +405,49 @@ func (m *Manager) ContainerStatsOneShot(ctx context.Context, containerID string)
 	return m.cli.ContainerStatsOneShot(ctx, containerID)
 }
 
+// ContainerExec runs a command inside a running container and returns the
+// exit code and combined stdout/stderr output.
+func (m *Manager) ContainerExec(ctx context.Context, containerID string, cmd []string) (int, string, error) {
+	execConfig := container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	}
+	execResp, err := m.cli.ContainerExecCreate(ctx, containerID, execConfig)
+	if err != nil {
+		return -1, "", fmt.Errorf("creating exec: %w", err)
+	}
+
+	hijack, err := m.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, "", fmt.Errorf("attaching exec: %w", err)
+	}
+	defer hijack.Close()
+
+	output, _ := io.ReadAll(hijack.Reader)
+
+	inspect, err := m.cli.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return -1, string(output), fmt.Errorf("inspecting exec: %w", err)
+	}
+
+	return inspect.ExitCode, string(output), nil
+}
+
+// WaitContainer blocks until a container stops and returns its exit code.
+func (m *Manager) WaitContainer(ctx context.Context, containerID string) (int64, error) {
+	statusCh, errCh := m.cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return -1, err
+		}
+	case status := <-statusCh:
+		return status.StatusCode, nil
+	}
+	return 0, nil
+}
+
 // DetectDockerSocket returns the Docker socket URI for the current platform.
 // It checks DOCKER_HOST first, then falls back to platform-specific defaults.
 func DetectDockerSocket() string {

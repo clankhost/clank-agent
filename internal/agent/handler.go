@@ -9,6 +9,7 @@ import (
 	"time"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
+	"github.com/anaremore/clank/apps/agent/internal/backup"
 	"github.com/anaremore/clank/apps/agent/internal/build"
 	"github.com/anaremore/clank/apps/agent/internal/deploy"
 	"github.com/anaremore/clank/apps/agent/internal/docker"
@@ -766,5 +767,31 @@ func (h *CommandHandler) HandleTunnelConfig(ctx context.Context, cfg *clankv1.Tu
 	// Start or restart cloudflared
 	if err := h.docker.EnsureCloudflared(ctx, token); err != nil {
 		log.Printf("Error starting cloudflared: %v", err)
+	}
+}
+
+// HandleBackup processes a BackupCommand — executes backup and reports result.
+func (h *CommandHandler) HandleBackup(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.BackupCommand) {
+	log.Printf("Handling backup command %s for service %s (type: %s)",
+		cmd.GetCommandId(), cmd.GetServiceSlug(), cmd.GetBackupType())
+
+	executor := backup.NewExecutor(h.docker)
+	result := executor.Execute(ctx, cmd)
+
+	if result.Success {
+		log.Printf("Backup %s completed: %d bytes, %d files",
+			cmd.GetBackupId(), result.SizeBytes, len(result.Files))
+	} else {
+		log.Printf("Backup %s failed: %s", cmd.GetBackupId(), result.ErrorMessage)
+	}
+
+	msg := &clankv1.AgentMessage{
+		Payload: &clankv1.AgentMessage_BackupResult{
+			BackupResult: result,
+		},
+	}
+	if err := stream.Send(msg); err != nil {
+		log.Printf("Failed to send backup result: %v (queuing)", err)
+		h.queuePendingResult(msg)
 	}
 }

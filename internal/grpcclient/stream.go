@@ -41,6 +41,9 @@ type UpdateHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.
 // EndpointHandler handles endpoint management commands.
 type EndpointHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.EndpointCommand)
 
+// BackupHandler handles backup commands.
+type BackupHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.BackupCommand)
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
 	OnDeploy           DeployHandler
@@ -48,6 +51,7 @@ type CommandHandlers struct {
 	OnTunnelConfig     TunnelConfigHandler
 	OnUpdate           UpdateHandler
 	OnEndpoint         EndpointHandler
+	OnBackup           BackupHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -173,6 +177,19 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 						}
 					}()
 					handlers.OnEndpoint(ctx, stream, p.EndpointCmd)
+				}()
+			}
+
+		case *clankv1.ControlMessage_BackupCmd:
+			log.Printf("Received backup command %s for service %s", p.BackupCmd.GetCommandId(), p.BackupCmd.GetServiceSlug())
+			if handlers.OnBackup != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in backup handler: %v", r)
+						}
+					}()
+					handlers.OnBackup(ctx, stream, p.BackupCmd)
 				}()
 			}
 
