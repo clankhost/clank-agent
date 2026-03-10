@@ -893,16 +893,17 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 			originsJSON = "[" + strings.Join(parts, ",") + "]"
 		}
 
-		// Single-line JSON to avoid heredoc/newline issues inside Docker sh -c.
+		// Write config JSON directly to ~/.openclaw/openclaw.json (the default
+		// path OpenClaw reads). Single-line JSON avoids heredoc/newline issues
+		// inside Docker sh -c.
 		configJSON := fmt.Sprintf(
 			`{"gateway":{"bind":"lan","trustedProxies":["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"],"auth":{"trustedProxy":{"userHeader":"X-Openclaw-User"}},"controlUi":{"allowedOrigins":%s,"dangerouslyAllowHostHeaderOriginFallback":true,"dangerouslyDisableDeviceAuth":true,"allowInsecureAuth":true}}}`,
 			originsJSON,
 		)
 
-		// Use printf to write the config file — avoids heredoc issues in sh -c.
-		writeConfig := fmt.Sprintf(`printf '%%s' '%s' > /app/openclaw-clank.json`, configJSON)
+		writeConfig := fmt.Sprintf(`mkdir -p ~/.openclaw && printf '%%s' '%s' > ~/.openclaw/openclaw.json`, configJSON)
 
-		env["CLANK_CONTAINER_CMD"] = writeConfig + " && exec node openclaw.mjs gateway --allow-unconfigured --auth trusted-proxy --config /app/openclaw-clank.json"
+		env["CLANK_CONTAINER_CMD"] = writeConfig + " && exec node openclaw.mjs gateway --allow-unconfigured --auth trusted-proxy"
 	}
 }
 

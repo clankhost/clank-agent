@@ -209,7 +209,7 @@ func TestInjectEndpointEnvVars_NoEndpoints_OpenClaw(t *testing.T) {
 	}
 	cmd := env["CLANK_CONTAINER_CMD"]
 	// Should write a JSON config file and start the gateway
-	if !contains(cmd, "openclaw-clank.json") {
+	if !contains(cmd, "openclaw.json") {
 		t.Error("CLANK_CONTAINER_CMD should write a JSON config file")
 	}
 	if !contains(cmd, "--auth trusted-proxy") {
@@ -271,12 +271,9 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 	if cmd == "" {
 		t.Fatal("CLANK_CONTAINER_CMD should be set")
 	}
-	// Should write a JSON config file
-	if !contains(cmd, "openclaw-clank.json") {
-		t.Error("should write a JSON config file")
-	}
-	if !contains(cmd, "--config /app/openclaw-clank.json") {
-		t.Error("should pass --config flag to gateway")
+	// Should write config to OpenClaw's default config path
+	if !contains(cmd, "~/.openclaw/openclaw.json") {
+		t.Error("should write config to ~/.openclaw/openclaw.json")
 	}
 	if !contains(cmd, "--auth trusted-proxy") {
 		t.Error("CLANK_CONTAINER_CMD should use --auth trusted-proxy")
@@ -358,7 +355,7 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 	}
 
 	// Should write JSON config file, not use dotted config set
-	if !contains(cmd, "openclaw-clank.json") {
+	if !contains(cmd, "openclaw.json") {
 		t.Error("should write a JSON config file")
 	}
 	if contains(cmd, "config set gateway.") {
@@ -407,7 +404,7 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 
 	// Should use JSON config file and trusted-proxy auth
 	cmd := env["CLANK_CONTAINER_CMD"]
-	if !contains(cmd, "openclaw-clank.json") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback":true`) {
+	if !contains(cmd, "openclaw.json") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback":true`) {
 		t.Errorf("CLANK_CONTAINER_CMD incorrect, got %q", cmd)
 	}
 	// Should include both http:// and https:// origins in JSON config
@@ -438,7 +435,7 @@ func TestInjectEndpointEnvVars_OpenClaw_HTTP(t *testing.T) {
 	if !contains(cmd, "--auth trusted-proxy") {
 		t.Errorf("OpenClaw should use --auth trusted-proxy, got %q", cmd)
 	}
-	if !contains(cmd, "openclaw-clank.json") {
+	if !contains(cmd, "openclaw.json") {
 		t.Error("OpenClaw should write a JSON config file")
 	}
 	if !contains(cmd, `"X-Openclaw-User"`) {
