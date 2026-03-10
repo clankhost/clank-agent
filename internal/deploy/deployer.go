@@ -39,8 +39,8 @@ var imageHandlers = []imageHandler{
 		inject:          injectOpenClawEnvVars,
 		startupRetries:  12,
 		startupInterval: 15, // ~180s total — gateway needs 90-180s depending on CPU
-		minCPU:          1.0,
-		minMemoryMB:     2048,
+		minCPU:          2.0,
+		minMemoryMB:     4096,
 	},
 }
 
@@ -854,7 +854,7 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 		env["OPENCLAW_GATEWAY_TOKEN"] = generateHexToken(16)
 	}
 	if _, ok := env["NODE_OPTIONS"]; !ok {
-		env["NODE_OPTIONS"] = "--max-old-space-size=1792"
+		env["NODE_OPTIONS"] = "--max-old-space-size=3584"
 	}
 	// Override CMD to configure and start the gateway:
 	//  1. Allow host-header origin fallback (required for non-loopback binding)

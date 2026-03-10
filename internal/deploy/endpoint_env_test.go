@@ -249,8 +249,8 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 		t.Errorf("OPENCLAW_GATEWAY_TOKEN is not valid hex: %v", err)
 	}
 
-	if env["NODE_OPTIONS"] != "--max-old-space-size=1792" {
-		t.Errorf("NODE_OPTIONS = %q, want '--max-old-space-size=1792'", env["NODE_OPTIONS"])
+	if env["NODE_OPTIONS"] != "--max-old-space-size=3584" {
+		t.Errorf("NODE_OPTIONS = %q, want '--max-old-space-size=3584'", env["NODE_OPTIONS"])
 	}
 
 	// CMD override should configure controlUi fallback, bind to all interfaces, and use token auth
@@ -353,7 +353,7 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 	if env["OPENCLAW_GATEWAY_TOKEN"] == "" {
 		t.Error("OPENCLAW_GATEWAY_TOKEN should be auto-generated")
 	}
-	if env["NODE_OPTIONS"] != "--max-old-space-size=1792" {
+	if env["NODE_OPTIONS"] != "--max-old-space-size=3584" {
 		t.Error("NODE_OPTIONS should be set")
 	}
 
