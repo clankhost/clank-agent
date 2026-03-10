@@ -556,6 +556,27 @@ func (h *CommandHandler) removeServiceContainers(ctx context.Context, cmd *clank
 		}
 	}
 
+	// Best-effort: remove the project network if now empty.
+	// Uses the traefik.docker.network label already set on deployed containers.
+	if len(containers) > 0 {
+		if netName, ok := containers[0].Labels["traefik.docker.network"]; ok && netName != "" {
+			nets, listErr := h.docker.ListClankProjectNetworks(ctx)
+			if listErr == nil {
+				for _, n := range nets {
+					if n.Name == netName {
+						removed, rmErr := h.docker.RemoveNetworkIfEmpty(ctx, n.ID)
+						if rmErr != nil {
+							log.Printf("Warning: failed to check/prune network %s: %v", netName, rmErr)
+						} else if removed {
+							log.Printf("Pruned empty project network %s after service removal", netName)
+						}
+						break
+					}
+				}
+			}
+		}
+	}
+
 	if lastErr != nil {
 		return fmt.Errorf("some containers failed to remove: %w", lastErr)
 	}

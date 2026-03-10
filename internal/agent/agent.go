@@ -104,6 +104,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.logCollector.Run(ctx)
 	go a.metCollector.Run(ctx)
 
+	// Start periodic network pruning to prevent address pool exhaustion
+	go a.runNetworkPruner(ctx)
+
 	wait := reconnectBaseWait
 
 	for {
@@ -357,6 +360,59 @@ func (a *Agent) collectInfo() (*sysinfo.Info, []sysinfo.ContainerStatus) {
 	}
 
 	return info, statuses
+}
+
+const networkPruneInterval = 30 * time.Minute
+
+// runNetworkPruner periodically removes empty clank-project-* networks
+// to prevent Docker address pool exhaustion.
+func (a *Agent) runNetworkPruner(ctx context.Context) {
+	// Let deploys settle after agent restart before first prune
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(2 * time.Minute):
+	}
+	a.pruneOrphanedNetworks(ctx)
+
+	ticker := time.NewTicker(networkPruneInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.pruneOrphanedNetworks(ctx)
+		}
+	}
+}
+
+// pruneOrphanedNetworks removes clank-project-* networks that have no
+// connected containers. Never touches non-clank networks or clank-services.
+func (a *Agent) pruneOrphanedNetworks(ctx context.Context) {
+	networks, err := a.dockerMgr.ListClankProjectNetworks(ctx)
+	if err != nil {
+		log.Printf("[network-prune] Failed to list networks: %v", err)
+		return
+	}
+
+	pruned := 0
+	for _, net := range networks {
+		removed, err := a.dockerMgr.RemoveNetworkIfEmpty(ctx, net.ID)
+		if err != nil {
+			log.Printf("[network-prune] Error pruning %s: %v", net.Name, err)
+			continue
+		}
+		if removed {
+			log.Printf("[network-prune] Removed empty network %s", net.Name)
+			pruned++
+		}
+	}
+
+	if pruned > 0 {
+		log.Printf("[network-prune] Pruned %d empty network(s)", pruned)
+	}
 }
 
 // reconnectTraefikToProjectNetworks inspects all managed containers

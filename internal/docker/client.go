@@ -454,6 +454,43 @@ func (m *Manager) FindTraefikContainer(ctx context.Context) string {
 	return containers[0].ID
 }
 
+// ListClankProjectNetworks returns all Docker networks whose name starts with "clank-project-".
+func (m *Manager) ListClankProjectNetworks(ctx context.Context) ([]NetworkInfo, error) {
+	networks, err := m.cli.NetworkList(ctx, network.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("listing networks: %w", err)
+	}
+	var result []NetworkInfo
+	for _, n := range networks {
+		if strings.HasPrefix(n.Name, "clank-project-") {
+			result = append(result, NetworkInfo{ID: n.ID, Name: n.Name})
+		}
+	}
+	return result, nil
+}
+
+// RemoveNetworkIfEmpty inspects a network and removes it only if it has
+// zero connected containers. Returns true if the network was removed.
+func (m *Manager) RemoveNetworkIfEmpty(ctx context.Context, networkID string) (bool, error) {
+	inspect, err := m.cli.NetworkInspect(ctx, networkID, network.InspectOptions{})
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspecting network: %w", err)
+	}
+	if len(inspect.Containers) > 0 {
+		return false, nil
+	}
+	if err := m.cli.NetworkRemove(ctx, networkID); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("removing network %s: %w", inspect.Name, err)
+	}
+	return true, nil
+}
+
 // ConnectToNetworkIfNeeded connects a container to a network, skipping
 // if already connected.
 func (m *Manager) ConnectToNetworkIfNeeded(ctx context.Context, containerID, networkName string) error {

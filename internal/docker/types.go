@@ -21,6 +21,12 @@ type RunOpts struct {
 	Volumes       []VolumeMount // Persistent volume mounts
 }
 
+// NetworkInfo describes a Docker network for pruning purposes.
+type NetworkInfo struct {
+	ID   string
+	Name string
+}
+
 // ContainerInfo describes a running managed container (for heartbeat reporting).
 type ContainerInfo struct {
 	ContainerID string
