@@ -216,10 +216,10 @@ func TestInjectEndpointEnvVars_NoEndpoints_OpenClaw(t *testing.T) {
 		t.Error("should use --auth trusted-proxy even without endpoints")
 	}
 	// JSON config should contain key settings
-	if !contains(cmd, `"dangerouslyDisableDeviceAuth": true`) {
+	if !contains(cmd, `"dangerouslyDisableDeviceAuth":true`) {
 		t.Error("should disable device auth even without endpoints")
 	}
-	if !contains(cmd, `"allowInsecureAuth": true`) {
+	if !contains(cmd, `"allowInsecureAuth":true`) {
 		t.Error("should allow insecure auth even without endpoints")
 	}
 	// No endpoint-derived vars
@@ -282,7 +282,7 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 		t.Error("CLANK_CONTAINER_CMD should use --auth trusted-proxy")
 	}
 	// JSON config should contain nested structure
-	if !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback": true`) {
+	if !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback":true`) {
 		t.Error("JSON config should set controlUi fallback")
 	}
 	// Should include both http:// and https:// origins in JSON array
@@ -299,10 +299,10 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 	if !contains(cmd, `"X-Openclaw-User"`) {
 		t.Error("should configure X-Openclaw-User header")
 	}
-	if !contains(cmd, `"dangerouslyDisableDeviceAuth": true`) {
+	if !contains(cmd, `"dangerouslyDisableDeviceAuth":true`) {
 		t.Error("should disable device auth")
 	}
-	if !contains(cmd, `"allowInsecureAuth": true`) {
+	if !contains(cmd, `"allowInsecureAuth":true`) {
 		t.Error("should allow insecure auth")
 	}
 	// Should NOT contain dotted config set commands
@@ -342,10 +342,10 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 	}
 
 	// JSON config should disable device auth and allow insecure auth
-	if !contains(cmd, `"dangerouslyDisableDeviceAuth": true`) {
+	if !contains(cmd, `"dangerouslyDisableDeviceAuth":true`) {
 		t.Error("should disable device auth")
 	}
-	if !contains(cmd, `"allowInsecureAuth": true`) {
+	if !contains(cmd, `"allowInsecureAuth":true`) {
 		t.Error("should allow insecure auth")
 	}
 
@@ -353,7 +353,7 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 	if !contains(cmd, `"trustedProxies"`) {
 		t.Error("should set trustedProxies")
 	}
-	if !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback": true`) {
+	if !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback":true`) {
 		t.Error("should set origin fallback")
 	}
 
@@ -407,7 +407,7 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 
 	// Should use JSON config file and trusted-proxy auth
 	cmd := env["CLANK_CONTAINER_CMD"]
-	if !contains(cmd, "openclaw-clank.json") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback": true`) {
+	if !contains(cmd, "openclaw-clank.json") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback":true`) {
 		t.Errorf("CLANK_CONTAINER_CMD incorrect, got %q", cmd)
 	}
 	// Should include both http:// and https:// origins in JSON config
