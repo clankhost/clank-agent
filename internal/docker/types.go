@@ -17,8 +17,9 @@ type RunOpts struct {
 	NetworkAlias  string // DNS alias for service discovery on the network
 	CPULimit      float64
 	MemoryLimitMB int
-	Command       []string      // Override the image CMD (e.g. via CLANK_CONTAINER_CMD)
-	Volumes       []VolumeMount // Persistent volume mounts
+	Command    []string      // Override the image CMD (e.g. via CLANK_CONTAINER_CMD)
+	Entrypoint []string      // Override the image ENTRYPOINT (nil = keep image default)
+	Volumes    []VolumeMount // Persistent volume mounts
 }
 
 // NetworkInfo describes a Docker network for pruning purposes.

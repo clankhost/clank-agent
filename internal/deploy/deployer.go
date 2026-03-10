@@ -250,9 +250,13 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	// Extract CLANK_CONTAINER_CMD magic env var (used as Docker CMD override).
+	// Clear the image entrypoint so CMD runs as a standalone shell command,
+	// not appended to an image ENTRYPOINT that would mangle it.
 	var cmdOverride []string
+	var entrypointOverride []string
 	if cmdStr, ok := opts.Env["CLANK_CONTAINER_CMD"]; ok && cmdStr != "" {
 		cmdOverride = []string{"sh", "-c", cmdStr}
+		entrypointOverride = []string{""} // Docker convention: clear image ENTRYPOINT
 		delete(opts.Env, "CLANK_CONTAINER_CMD")
 		log.Printf("Using CMD override: %v", cmdOverride)
 	}
@@ -277,6 +281,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		CPULimit:      cpuLimit,
 		MemoryLimitMB: memoryLimitMB,
 		Command:       cmdOverride,
+		Entrypoint:    entrypointOverride,
 		Volumes:       opts.Volumes,
 	})
 	if err != nil {
@@ -847,8 +852,14 @@ func injectWordPressEnvVars(env map[string]string, resolvedURL, pathPrefix strin
 
 // injectOpenClawEnvVars sets env vars required for OpenClaw gateway startup.
 // Without OPENCLAW_GATEWAY_TOKEN the gateway never opens its HTTP listener.
-// Without --bind lan --auth token the gateway binds to loopback only (unreachable
-// from outside the container in Docker bridge networking).
+// Without --bind lan the gateway binds to loopback only (unreachable from
+// outside the container in Docker bridge networking).
+//
+// All agent-deployed OpenClaw services sit behind Traefik which injects an
+// X-Openclaw-User header, so we always use --auth trusted-proxy regardless
+// of TLS. This avoids device-identity issues on plain HTTP and simplifies
+// the configuration. Both http:// and https:// origins are allowed so the
+// UI works whether or not Let's Encrypt has provisioned a cert yet.
 func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string) {
 	if _, ok := env["OPENCLAW_GATEWAY_TOKEN"]; !ok {
 		env["OPENCLAW_GATEWAY_TOKEN"] = generateHexToken(16)
@@ -856,39 +867,35 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 	if _, ok := env["NODE_OPTIONS"]; !ok {
 		env["NODE_OPTIONS"] = "--max-old-space-size=3584"
 	}
-	// Override CMD to configure and start the gateway:
-	//  1. Allow host-header origin fallback (required for non-loopback binding)
-	//  2. Add endpoint URL to allowedOrigins so the UI doesn't get CORS-blocked
-	//  3. Trust RFC1918 subnets as proxies (Traefik forwards from Docker network)
-	//  4. For HTTP: use trusted-proxy auth so Traefik's X-Openclaw-User header
-	//     bypasses device identity (browser has no Web Crypto on plain HTTP)
 	if _, ok := env["CLANK_CONTAINER_CMD"]; !ok {
 		configCmds := "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true"
+
+		// Include both http:// and https:// origins so CORS works regardless
+		// of whether Let's Encrypt has issued a cert yet.
 		if resolvedURL != "" {
-			configCmds += fmt.Sprintf(` && node openclaw.mjs config set gateway.controlUi.allowedOrigins '["%s"]'`, resolvedURL)
+			hostname := resolvedURL
+			for _, prefix := range []string{"https://", "http://"} {
+				hostname = strings.TrimPrefix(hostname, prefix)
+			}
+			// Strip any path suffix to get bare hostname
+			if idx := strings.Index(hostname, "/"); idx > 0 {
+				hostname = hostname[:idx]
+			}
+			configCmds += fmt.Sprintf(` && node openclaw.mjs config set gateway.controlUi.allowedOrigins '["https://%s", "http://%s"]'`, hostname, hostname)
 		}
-		// Always trust Docker-network proxies so Traefik headers are accepted.
+
+		// Trust Docker-network proxies so Traefik headers are accepted.
 		configCmds += ` && node openclaw.mjs config set gateway.trustedProxies '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'`
 
-		isHTTP := resolvedURL != "" && !strings.HasPrefix(resolvedURL, "https://")
-		if isHTTP {
-			// HTTP endpoints lack a secure context — browser Web Crypto API is
-			// unavailable, so device identity will always fail.
-			configCmds += " && node openclaw.mjs config set gateway.controlUi.dangerouslyDisableDeviceAuth true"
-			configCmds += " && node openclaw.mjs config set gateway.controlUi.allowInsecureAuth true"
-			// Tell the gateway to accept Traefik's X-Openclaw-User header as
-			// proof of identity. Traefik injects this header via middleware
-			// labels on the container, so every request arrives pre-authenticated.
-			configCmds += ` && node openclaw.mjs config set gateway.auth.trustedProxy '{"userHeader":"X-Openclaw-User"}'`
-		}
+		// Always disable device auth and allow insecure auth — Traefik
+		// provides identity via X-Openclaw-User header (trusted-proxy mode).
+		// Device auth requires Web Crypto (HTTPS-only) and is redundant
+		// when all traffic is pre-authenticated by the reverse proxy.
+		configCmds += " && node openclaw.mjs config set gateway.controlUi.dangerouslyDisableDeviceAuth true"
+		configCmds += " && node openclaw.mjs config set gateway.controlUi.allowInsecureAuth true"
+		configCmds += ` && node openclaw.mjs config set gateway.auth.trustedProxy '{"userHeader":"X-Openclaw-User"}'`
 
-		// Auth mode: trusted-proxy for HTTP (Traefik injects identity header),
-		//            token for HTTPS (browser has secure context for device identity).
-		authMode := "token"
-		if isHTTP {
-			authMode = "trusted-proxy"
-		}
-		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth " + authMode
+		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth trusted-proxy"
 	}
 }
 

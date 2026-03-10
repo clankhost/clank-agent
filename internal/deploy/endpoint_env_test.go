@@ -207,8 +207,19 @@ func TestInjectEndpointEnvVars_NoEndpoints_OpenClaw(t *testing.T) {
 	if env["OPENCLAW_GATEWAY_TOKEN"] == "" {
 		t.Error("OPENCLAW_GATEWAY_TOKEN should be set even without endpoints")
 	}
-	if !contains(env["CLANK_CONTAINER_CMD"], "--bind lan") {
+	cmd := env["CLANK_CONTAINER_CMD"]
+	if !contains(cmd, "--bind lan") {
 		t.Error("CLANK_CONTAINER_CMD should be set even without endpoints")
+	}
+	// HTTP fallback configs should always be set (even without endpoints)
+	if !contains(cmd, "--auth trusted-proxy") {
+		t.Error("should use --auth trusted-proxy even without endpoints")
+	}
+	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
+		t.Error("should disable device auth even without endpoints")
+	}
+	if !contains(cmd, "allowInsecureAuth true") {
+		t.Error("should allow insecure auth even without endpoints")
 	}
 	// No endpoint-derived vars
 	if _, ok := env["CLANK_BASE_URL"]; ok {
@@ -253,7 +264,8 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 		t.Errorf("NODE_OPTIONS = %q, want '--max-old-space-size=3584'", env["NODE_OPTIONS"])
 	}
 
-	// CMD override should configure controlUi fallback, bind to all interfaces, and use token auth
+	// CMD override should configure controlUi fallback, bind to all interfaces,
+	// and use trusted-proxy auth (all agent-deployed OpenClaw is behind Traefik).
 	cmd := env["CLANK_CONTAINER_CMD"]
 	if cmd == "" {
 		t.Fatal("CLANK_CONTAINER_CMD should be set")
@@ -264,15 +276,25 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 	if !contains(cmd, "--bind lan") {
 		t.Error("CLANK_CONTAINER_CMD should contain --bind lan")
 	}
-	if !contains(cmd, "--auth token") {
-		t.Error("CLANK_CONTAINER_CMD should contain --auth token for HTTPS")
+	if !contains(cmd, "--auth trusted-proxy") {
+		t.Error("CLANK_CONTAINER_CMD should use --auth trusted-proxy")
 	}
-	// HTTPS should NOT have trusted-proxy config or device auth bypass
-	if contains(cmd, "trustedProxy") {
-		t.Error("HTTPS should not set gateway.auth.trustedProxy")
+	// Should include both http:// and https:// origins
+	if !contains(cmd, `"https://myhost.example.com"`) {
+		t.Error("allowedOrigins should include https:// URL")
 	}
-	if contains(cmd, "dangerouslyDisableDeviceAuth") {
-		t.Error("HTTPS should not disable device auth")
+	if !contains(cmd, `"http://myhost.example.com"`) {
+		t.Error("allowedOrigins should include http:// URL")
+	}
+	// All deploys get trusted-proxy + device auth bypass (Traefik provides identity)
+	if !contains(cmd, "gateway.auth.trustedProxy") {
+		t.Error("should set gateway.auth.trustedProxy config")
+	}
+	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
+		t.Error("should disable device auth")
+	}
+	if !contains(cmd, "allowInsecureAuth true") {
+		t.Error("should allow insecure auth")
 	}
 }
 
@@ -285,28 +307,36 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 		t.Fatal("CLANK_CONTAINER_CMD should be set")
 	}
 
-	// HTTP should use trusted-proxy auth (Traefik injects identity header)
+	// Should use trusted-proxy auth (Traefik injects identity header)
 	if !contains(cmd, "--auth trusted-proxy") {
-		t.Error("HTTP should use --auth trusted-proxy")
+		t.Error("should use --auth trusted-proxy")
 	}
 	if contains(cmd, "--auth token") {
-		t.Error("HTTP should NOT use --auth token")
+		t.Error("should NOT use --auth token")
+	}
+
+	// Should include both http:// and https:// origins
+	if !contains(cmd, `"https://openclaw.172.30.227.155.sslip.io"`) {
+		t.Error("allowedOrigins should include https:// URL")
+	}
+	if !contains(cmd, `"http://openclaw.172.30.227.155.sslip.io"`) {
+		t.Error("allowedOrigins should include http:// URL")
 	}
 
 	// Should set gateway.auth.trustedProxy with userHeader
 	if !contains(cmd, `gateway.auth.trustedProxy`) {
-		t.Error("HTTP should set gateway.auth.trustedProxy config")
+		t.Error("should set gateway.auth.trustedProxy config")
 	}
 	if !contains(cmd, `X-Openclaw-User`) {
-		t.Error("HTTP should configure X-Openclaw-User as trusted proxy header")
+		t.Error("should configure X-Openclaw-User as trusted proxy header")
 	}
 
-	// Should disable device auth and allow insecure auth for HTTP
+	// Should disable device auth and allow insecure auth
 	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
-		t.Error("HTTP should disable device auth")
+		t.Error("should disable device auth")
 	}
 	if !contains(cmd, "allowInsecureAuth true") {
-		t.Error("HTTP should allow insecure auth")
+		t.Error("should allow insecure auth")
 	}
 
 	// Should still set trusted proxies and origin fallback
@@ -357,10 +387,14 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 		t.Error("NODE_OPTIONS should be set")
 	}
 
-	// HTTPS endpoint: should use --auth token, NOT trusted-proxy
+	// All agent-deployed OpenClaw uses trusted-proxy auth (Traefik provides identity)
 	cmd := env["CLANK_CONTAINER_CMD"]
-	if !contains(cmd, "--bind lan") || !contains(cmd, "--auth token") || !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback") {
+	if !contains(cmd, "--bind lan") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback") {
 		t.Errorf("CLANK_CONTAINER_CMD incorrect, got %q", cmd)
+	}
+	// Should include both http:// and https:// origins
+	if !contains(cmd, `"https://myhost.example.com"`) || !contains(cmd, `"http://myhost.example.com"`) {
+		t.Errorf("allowedOrigins should include both schemes, got %q", cmd)
 	}
 
 	// Should NOT have WordPress vars
@@ -381,13 +415,20 @@ func TestInjectEndpointEnvVars_OpenClaw_HTTP(t *testing.T) {
 		t.Errorf("CLANK_BASE_URL = %q, want http://...", env["CLANK_BASE_URL"])
 	}
 
-	// HTTP endpoint: should use --auth trusted-proxy
+	// Should use --auth trusted-proxy
 	cmd := env["CLANK_CONTAINER_CMD"]
 	if !contains(cmd, "--auth trusted-proxy") {
-		t.Errorf("HTTP OpenClaw should use --auth trusted-proxy, got %q", cmd)
+		t.Errorf("OpenClaw should use --auth trusted-proxy, got %q", cmd)
 	}
 	if !contains(cmd, "gateway.auth.trustedProxy") {
-		t.Error("HTTP OpenClaw should configure gateway.auth.trustedProxy")
+		t.Error("OpenClaw should configure gateway.auth.trustedProxy")
+	}
+	// Should include both http:// and https:// origins
+	if !contains(cmd, `"https://openclaw.172.30.227.155.sslip.io"`) {
+		t.Error("allowedOrigins should include https:// URL")
+	}
+	if !contains(cmd, `"http://openclaw.172.30.227.155.sslip.io"`) {
+		t.Error("allowedOrigins should include http:// URL")
 	}
 }
 
