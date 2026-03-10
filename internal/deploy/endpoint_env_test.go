@@ -208,17 +208,18 @@ func TestInjectEndpointEnvVars_NoEndpoints_OpenClaw(t *testing.T) {
 		t.Error("OPENCLAW_GATEWAY_TOKEN should be set even without endpoints")
 	}
 	cmd := env["CLANK_CONTAINER_CMD"]
-	if !contains(cmd, "--bind lan") {
-		t.Error("CLANK_CONTAINER_CMD should be set even without endpoints")
+	// Should write a JSON config file and start the gateway
+	if !contains(cmd, "openclaw-clank.json") {
+		t.Error("CLANK_CONTAINER_CMD should write a JSON config file")
 	}
-	// HTTP fallback configs should always be set (even without endpoints)
 	if !contains(cmd, "--auth trusted-proxy") {
 		t.Error("should use --auth trusted-proxy even without endpoints")
 	}
-	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
+	// JSON config should contain key settings
+	if !contains(cmd, `"dangerouslyDisableDeviceAuth": true`) {
 		t.Error("should disable device auth even without endpoints")
 	}
-	if !contains(cmd, "allowInsecureAuth true") {
+	if !contains(cmd, `"allowInsecureAuth": true`) {
 		t.Error("should allow insecure auth even without endpoints")
 	}
 	// No endpoint-derived vars
@@ -264,37 +265,49 @@ func TestInjectOpenClawEnvVars(t *testing.T) {
 		t.Errorf("NODE_OPTIONS = %q, want '--max-old-space-size=3584'", env["NODE_OPTIONS"])
 	}
 
-	// CMD override should configure controlUi fallback, bind to all interfaces,
-	// and use trusted-proxy auth (all agent-deployed OpenClaw is behind Traefik).
+	// CMD should write a nested JSON config file (not dotted config set keys)
+	// and start the gateway with --auth trusted-proxy.
 	cmd := env["CLANK_CONTAINER_CMD"]
 	if cmd == "" {
 		t.Fatal("CLANK_CONTAINER_CMD should be set")
 	}
-	if !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback true") {
-		t.Error("CLANK_CONTAINER_CMD should set controlUi fallback in config")
+	// Should write a JSON config file
+	if !contains(cmd, "openclaw-clank.json") {
+		t.Error("should write a JSON config file")
 	}
-	if !contains(cmd, "--bind lan") {
-		t.Error("CLANK_CONTAINER_CMD should contain --bind lan")
+	if !contains(cmd, "--config /app/openclaw-clank.json") {
+		t.Error("should pass --config flag to gateway")
 	}
 	if !contains(cmd, "--auth trusted-proxy") {
 		t.Error("CLANK_CONTAINER_CMD should use --auth trusted-proxy")
 	}
-	// Should include both http:// and https:// origins
+	// JSON config should contain nested structure
+	if !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback": true`) {
+		t.Error("JSON config should set controlUi fallback")
+	}
+	// Should include both http:// and https:// origins in JSON array
 	if !contains(cmd, `"https://myhost.example.com"`) {
 		t.Error("allowedOrigins should include https:// URL")
 	}
 	if !contains(cmd, `"http://myhost.example.com"`) {
 		t.Error("allowedOrigins should include http:// URL")
 	}
-	// All deploys get trusted-proxy + device auth bypass (Traefik provides identity)
-	if !contains(cmd, "gateway.auth.trustedProxy") {
-		t.Error("should set gateway.auth.trustedProxy config")
+	// JSON config should have trustedProxy with userHeader
+	if !contains(cmd, `"userHeader"`) {
+		t.Error("should set trustedProxy userHeader in JSON config")
 	}
-	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
+	if !contains(cmd, `"X-Openclaw-User"`) {
+		t.Error("should configure X-Openclaw-User header")
+	}
+	if !contains(cmd, `"dangerouslyDisableDeviceAuth": true`) {
 		t.Error("should disable device auth")
 	}
-	if !contains(cmd, "allowInsecureAuth true") {
+	if !contains(cmd, `"allowInsecureAuth": true`) {
 		t.Error("should allow insecure auth")
+	}
+	// Should NOT contain dotted config set commands
+	if contains(cmd, "config set gateway.") {
+		t.Error("should NOT use dotted 'config set' commands — use JSON config file instead")
 	}
 }
 
@@ -307,7 +320,7 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 		t.Fatal("CLANK_CONTAINER_CMD should be set")
 	}
 
-	// Should use trusted-proxy auth (Traefik injects identity header)
+	// Should use trusted-proxy auth
 	if !contains(cmd, "--auth trusted-proxy") {
 		t.Error("should use --auth trusted-proxy")
 	}
@@ -315,7 +328,7 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 		t.Error("should NOT use --auth token")
 	}
 
-	// Should include both http:// and https:// origins
+	// JSON config should include both http:// and https:// origins
 	if !contains(cmd, `"https://openclaw.172.30.227.155.sslip.io"`) {
 		t.Error("allowedOrigins should include https:// URL")
 	}
@@ -323,28 +336,33 @@ func TestInjectOpenClawEnvVars_HTTP(t *testing.T) {
 		t.Error("allowedOrigins should include http:// URL")
 	}
 
-	// Should set gateway.auth.trustedProxy with userHeader
-	if !contains(cmd, `gateway.auth.trustedProxy`) {
-		t.Error("should set gateway.auth.trustedProxy config")
-	}
-	if !contains(cmd, `X-Openclaw-User`) {
+	// JSON config should contain trusted proxy header
+	if !contains(cmd, `"X-Openclaw-User"`) {
 		t.Error("should configure X-Openclaw-User as trusted proxy header")
 	}
 
-	// Should disable device auth and allow insecure auth
-	if !contains(cmd, "dangerouslyDisableDeviceAuth true") {
+	// JSON config should disable device auth and allow insecure auth
+	if !contains(cmd, `"dangerouslyDisableDeviceAuth": true`) {
 		t.Error("should disable device auth")
 	}
-	if !contains(cmd, "allowInsecureAuth true") {
+	if !contains(cmd, `"allowInsecureAuth": true`) {
 		t.Error("should allow insecure auth")
 	}
 
-	// Should still set trusted proxies and origin fallback
-	if !contains(cmd, "trustedProxies") {
+	// JSON config should have trustedProxies and origin fallback
+	if !contains(cmd, `"trustedProxies"`) {
 		t.Error("should set trustedProxies")
 	}
-	if !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback true") {
+	if !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback": true`) {
 		t.Error("should set origin fallback")
+	}
+
+	// Should write JSON config file, not use dotted config set
+	if !contains(cmd, "openclaw-clank.json") {
+		t.Error("should write a JSON config file")
+	}
+	if contains(cmd, "config set gateway.") {
+		t.Error("should NOT use dotted 'config set' commands")
 	}
 }
 
@@ -387,12 +405,12 @@ func TestInjectEndpointEnvVars_OpenClaw(t *testing.T) {
 		t.Error("NODE_OPTIONS should be set")
 	}
 
-	// All agent-deployed OpenClaw uses trusted-proxy auth (Traefik provides identity)
+	// Should use JSON config file and trusted-proxy auth
 	cmd := env["CLANK_CONTAINER_CMD"]
-	if !contains(cmd, "--bind lan") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, "dangerouslyAllowHostHeaderOriginFallback") {
+	if !contains(cmd, "openclaw-clank.json") || !contains(cmd, "--auth trusted-proxy") || !contains(cmd, `"dangerouslyAllowHostHeaderOriginFallback": true`) {
 		t.Errorf("CLANK_CONTAINER_CMD incorrect, got %q", cmd)
 	}
-	// Should include both http:// and https:// origins
+	// Should include both http:// and https:// origins in JSON config
 	if !contains(cmd, `"https://myhost.example.com"`) || !contains(cmd, `"http://myhost.example.com"`) {
 		t.Errorf("allowedOrigins should include both schemes, got %q", cmd)
 	}
@@ -415,15 +433,18 @@ func TestInjectEndpointEnvVars_OpenClaw_HTTP(t *testing.T) {
 		t.Errorf("CLANK_BASE_URL = %q, want http://...", env["CLANK_BASE_URL"])
 	}
 
-	// Should use --auth trusted-proxy
+	// Should use JSON config file and trusted-proxy auth
 	cmd := env["CLANK_CONTAINER_CMD"]
 	if !contains(cmd, "--auth trusted-proxy") {
 		t.Errorf("OpenClaw should use --auth trusted-proxy, got %q", cmd)
 	}
-	if !contains(cmd, "gateway.auth.trustedProxy") {
-		t.Error("OpenClaw should configure gateway.auth.trustedProxy")
+	if !contains(cmd, "openclaw-clank.json") {
+		t.Error("OpenClaw should write a JSON config file")
 	}
-	// Should include both http:// and https:// origins
+	if !contains(cmd, `"X-Openclaw-User"`) {
+		t.Error("OpenClaw should configure trustedProxy userHeader")
+	}
+	// Should include both http:// and https:// origins in JSON
 	if !contains(cmd, `"https://openclaw.172.30.227.155.sslip.io"`) {
 		t.Error("allowedOrigins should include https:// URL")
 	}

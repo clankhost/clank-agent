@@ -868,34 +868,54 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 		env["NODE_OPTIONS"] = "--max-old-space-size=3584"
 	}
 	if _, ok := env["CLANK_CONTAINER_CMD"]; !ok {
-		configCmds := "node openclaw.mjs config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true"
-
-		// Include both http:// and https:// origins so CORS works regardless
-		// of whether Let's Encrypt has issued a cert yet.
+		// Build a proper nested JSON config file instead of using dotted
+		// "config set" keys — dotted keys may not be parsed as nested config
+		// by OpenClaw, causing allowedOrigins and other settings to silently
+		// fail.
+		origins := []string{}
 		if resolvedURL != "" {
 			hostname := resolvedURL
 			for _, prefix := range []string{"https://", "http://"} {
 				hostname = strings.TrimPrefix(hostname, prefix)
 			}
-			// Strip any path suffix to get bare hostname
 			if idx := strings.Index(hostname, "/"); idx > 0 {
 				hostname = hostname[:idx]
 			}
-			configCmds += fmt.Sprintf(` && node openclaw.mjs config set gateway.controlUi.allowedOrigins '["https://%s", "http://%s"]'`, hostname, hostname)
+			origins = append(origins, fmt.Sprintf("https://%s", hostname), fmt.Sprintf("http://%s", hostname))
 		}
 
-		// Trust Docker-network proxies so Traefik headers are accepted.
-		configCmds += ` && node openclaw.mjs config set gateway.trustedProxies '["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"]'`
+		originsJSON := "[]"
+		if len(origins) > 0 {
+			parts := make([]string, len(origins))
+			for i, o := range origins {
+				parts[i] = fmt.Sprintf(`"%s"`, o)
+			}
+			originsJSON = "[" + strings.Join(parts, ",") + "]"
+		}
 
-		// Always disable device auth and allow insecure auth — Traefik
-		// provides identity via X-Openclaw-User header (trusted-proxy mode).
-		// Device auth requires Web Crypto (HTTPS-only) and is redundant
-		// when all traffic is pre-authenticated by the reverse proxy.
-		configCmds += " && node openclaw.mjs config set gateway.controlUi.dangerouslyDisableDeviceAuth true"
-		configCmds += " && node openclaw.mjs config set gateway.controlUi.allowInsecureAuth true"
-		configCmds += ` && node openclaw.mjs config set gateway.auth.trustedProxy '{"userHeader":"X-Openclaw-User"}'`
+		configJSON := fmt.Sprintf(`{
+  "gateway": {
+    "bind": "lan",
+    "trustedProxies": ["172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"],
+    "auth": {
+      "trustedProxy": {"userHeader": "X-Openclaw-User"}
+    },
+    "controlUi": {
+      "allowedOrigins": %s,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "dangerouslyDisableDeviceAuth": true,
+      "allowInsecureAuth": true
+    }
+  }
+}`, originsJSON)
 
-		env["CLANK_CONTAINER_CMD"] = configCmds + " && exec node openclaw.mjs gateway --allow-unconfigured --bind lan --auth trusted-proxy"
+		// Write config file, then start gateway. Use heredoc-style cat to
+		// avoid shell quoting issues with nested JSON.
+		writeConfig := fmt.Sprintf(`cat > /app/openclaw-clank.json << 'CLANK_EOF'
+%s
+CLANK_EOF`, configJSON)
+
+		env["CLANK_CONTAINER_CMD"] = writeConfig + " && exec node openclaw.mjs gateway --allow-unconfigured --auth trusted-proxy --config /app/openclaw-clank.json"
 	}
 }
 
