@@ -707,7 +707,22 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 			}
 		}
 
-		// Still closed — capture logs and fail
+		// Still closed — re-probe common ports to detect if app started on a different port
+		commonPorts := []int{effectivePort, 80, 443, 3000, 4000, 5000, 5173, 8000, 8080, 8443, 9000}
+		if imageMeta != nil {
+			commonPorts = append(commonPorts, imageMeta.ExposedPorts...)
+		}
+		finalProbe := docker.ProbeAllPorts(ctx, ip, commonPorts)
+		result.Ports = finalProbe
+
+		var openPorts []string
+		for _, p := range finalProbe {
+			if p.Protocol != "closed" && p.Port != effectivePort {
+				openPorts = append(openPorts, fmt.Sprintf("%d (%s)", p.Port, p.Protocol))
+			}
+		}
+
+		// Capture logs and fail
 		logs, logErr := d.docker.GetStartupLogs(ctx, containerID, 100)
 		if logErr == nil {
 			result.StartupLogs = logs
@@ -716,7 +731,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		if stopErr := d.docker.StopAndRemove(ctx, containerID); stopErr != nil {
 			log.Printf("Warning: failed to remove container: %v", stopErr)
 		}
-		return result, fmt.Errorf("port %d never opened after %d attempts (~%ds total)", effectivePort, retries, retries*interval)
+
+		errMsg := fmt.Sprintf("port %d never opened after %d attempts (~%ds total)", effectivePort, retries, retries*interval)
+		if len(openPorts) > 0 {
+			errMsg += fmt.Sprintf(". Detected open ports: %s — update your port setting?", strings.Join(openPorts, ", "))
+		}
+		return result, fmt.Errorf("%s", errMsg)
 	}
 
 	// Fallback: skip health checks

@@ -97,6 +97,22 @@ func resolveExecPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// Linux /proc/self/exe appends " (deleted)" when the binary was unlinked
+	execPath = strings.TrimSuffix(execPath, " (deleted)")
+
+	// After a previous update, the running binary may have been renamed to
+	// .old or .new. Recover the canonical path if the suffixed path is stale.
+	base := filepath.Base(execPath)
+	dir := filepath.Dir(execPath)
+	if strings.HasSuffix(base, ".old") || strings.HasSuffix(base, ".new") {
+		canonical := filepath.Join(dir, strings.TrimSuffix(strings.TrimSuffix(base, ".old"), ".new"))
+		if _, statErr := os.Stat(canonical); statErr == nil {
+			log.Printf("[update] Recovered canonical path: %s (was %s)", canonical, execPath)
+			execPath = canonical
+		}
+	}
+
 	resolved, err := filepath.EvalSymlinks(execPath)
 	if err != nil {
 		log.Printf("[update] EvalSymlinks(%s) failed: %v, using raw path", execPath, err)
