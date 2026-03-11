@@ -45,6 +45,29 @@ type RegistryAuth struct {
 	Password string
 }
 
+// DecodeRegistryAuth decodes a base64-encoded JSON auth string from the
+// control plane into a RegistryAuth struct. Returns nil on decode failure.
+func DecodeRegistryAuth(encoded string) *RegistryAuth {
+	if encoded == "" {
+		return nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	var auth struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal(raw, &auth); err != nil {
+		return nil
+	}
+	if auth.Username == "" {
+		return nil
+	}
+	return &RegistryAuth{Username: auth.Username, Password: auth.Password}
+}
+
 // encodeRegistryAuth encodes registry credentials as a base64 JSON string
 // for the Docker API's X-Registry-Auth header.
 func encodeRegistryAuth(auth *RegistryAuth) string {

@@ -353,9 +353,13 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		})
 	}
 
-	// Provide registry auth if the image is from the Clank registry (ADR-006).
+	// Provide registry auth for Clank-hosted images (ADR-006).
+	// Prefer command-supplied auth (works for all agents regardless of enrollment timing),
+	// fall back to agent config (for agents enrolled with registry creds).
 	var registryAuth *docker.RegistryAuth
-	if h.cfg.RegistryURL != "" && h.cfg.RegistryUsername != "" &&
+	if cmd.GetRegistryAuth() != "" {
+		registryAuth = docker.DecodeRegistryAuth(cmd.GetRegistryAuth())
+	} else if h.cfg.RegistryURL != "" && h.cfg.RegistryUsername != "" &&
 		strings.HasPrefix(imageTag, h.cfg.RegistryURL+"/") {
 		registryAuth = &docker.RegistryAuth{
 			Username: h.cfg.RegistryUsername,

@@ -1501,8 +1501,11 @@ type DeployCommand struct {
 	ContainerCommand []string `protobuf:"bytes,18,rep,name=container_command,json=containerCommand,proto3" json:"container_command,omitempty"`
 	// Slugs of companion services that must be running+healthy before starting.
 	CompanionSlugs []string `protobuf:"bytes,19,rep,name=companion_slugs,json=companionSlugs,proto3" json:"companion_slugs,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Base64-encoded Docker registry auth JSON for pulling private images (ADR-006).
+	// Format: base64({"username":"...","password":"..."})
+	RegistryAuth  string `protobuf:"bytes,20,opt,name=registry_auth,json=registryAuth,proto3" json:"registry_auth,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeployCommand) Reset() {
@@ -1666,6 +1669,13 @@ func (x *DeployCommand) GetCompanionSlugs() []string {
 		return x.CompanionSlugs
 	}
 	return nil
+}
+
+func (x *DeployCommand) GetRegistryAuth() string {
+	if x != nil {
+		return x.RegistryAuth
+	}
+	return ""
 }
 
 // A named Docker volume mount for persistent storage.
@@ -2968,7 +2978,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\tsignature\x18\x05 \x01(\tR\tsignature\"N\n" +
 	"\fTunnelConfig\x12!\n" +
 	"\ftunnel_token\x18\x01 \x01(\tR\vtunnelToken\x12\x1b\n" +
-	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xf2\x06\n" +
+	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\x97\a\n" +
 	"\rDeployCommand\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12!\n" +
 	"\fservice_slug\x18\x02 \x01(\tR\vserviceSlug\x12\x1b\n" +
@@ -2989,7 +2999,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x10active_endpoints\x18\x10 \x03(\v2\x16.clank.v1.EndpointInfoR\x0factiveEndpoints\x12:\n" +
 	"\rvolume_mounts\x18\x11 \x03(\v2\x15.clank.v1.VolumeMountR\fvolumeMounts\x12+\n" +
 	"\x11container_command\x18\x12 \x03(\tR\x10containerCommand\x12'\n" +
-	"\x0fcompanion_slugs\x18\x13 \x03(\tR\x0ecompanionSlugs\x1a:\n" +
+	"\x0fcompanion_slugs\x18\x13 \x03(\tR\x0ecompanionSlugs\x12#\n" +
+	"\rregistry_auth\x18\x14 \x01(\tR\fregistryAuth\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
