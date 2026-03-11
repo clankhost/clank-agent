@@ -421,11 +421,16 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		opts.OnLog(fmt.Sprintf("Container %s started, running health checks...", containerName))
 	}
 
-	// Get container IP for health checks and probing
-	ip, err := d.docker.GetContainerIP(ctx, containerID, primaryNetwork)
-	if err != nil {
-		// IP lookup can fail if the container exited between crash detection and now.
-		// Re-inspect to check if it crashed.
+	// Get container IP for health checks and probing.
+	// Retry a few times — Docker may briefly report no IP if the container exits
+	// quickly or the network attachment hasn't propagated yet.
+	var ip string
+	for ipAttempt := 0; ipAttempt < 3; ipAttempt++ {
+		ip, err = d.docker.GetContainerIP(ctx, containerID, primaryNetwork)
+		if err == nil {
+			break
+		}
+		// Check if container has exited/crashed.
 		ci2, inspErr := d.docker.InspectContainer(ctx, containerID)
 		if inspErr == nil && (ci2.State == "exited" || ci2.State == "dead") {
 			result.Inspection = ci2
@@ -442,6 +447,19 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 				msg = "Container killed: out of memory (OOMKilled)"
 			}
 			return result, fmt.Errorf("%s", msg)
+		}
+		state := "unknown"
+		if inspErr == nil {
+			state = ci2.State
+		}
+		log.Printf("IP lookup attempt %d failed (container state=%s): %v", ipAttempt+1, state, err)
+		time.Sleep(time.Second)
+	}
+	if err != nil {
+		// Collect startup logs for diagnostics even when the error is not a clean exit
+		logs, logErr := d.docker.GetStartupLogs(ctx, containerID, 100)
+		if logErr == nil {
+			result.StartupLogs = logs
 		}
 		return result, fmt.Errorf("getting container IP: %w", err)
 	}
