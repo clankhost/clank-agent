@@ -40,7 +40,7 @@ func (m *Manager) EnsureCloudflared(ctx context.Context, tunnelToken string) err
 	log.Println("Starting cloudflared...")
 
 	// Pull image
-	if err := m.PullImage(ctx, cloudflaredImage, func(msg string) {
+	if err := m.PullImage(ctx, cloudflaredImage, nil, func(msg string) {
 		log.Printf("  %s", msg)
 	}); err != nil {
 		return fmt.Errorf("pulling cloudflared image: %w", err)
@@ -97,7 +97,7 @@ func (m *Manager) EnsureCloudflaredNamed(ctx context.Context, name, tunnelToken 
 
 	log.Printf("Starting cloudflared %s...", name)
 
-	if err := m.PullImage(ctx, cloudflaredImage, func(msg string) {
+	if err := m.PullImage(ctx, cloudflaredImage, nil, func(msg string) {
 		log.Printf("  %s", msg)
 	}); err != nil {
 		return fmt.Errorf("pulling cloudflared image: %w", err)

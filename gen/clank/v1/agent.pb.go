@@ -193,8 +193,12 @@ type EnrollResponse struct {
 	AuthToken string `protobuf:"bytes,6,opt,name=auth_token,json=authToken,proto3" json:"auth_token,omitempty"`
 	// Tunnel endpoint (e.g. grpc.clank.host) for Cloudflare Tunnel access.
 	TunnelEndpoint string `protobuf:"bytes,7,opt,name=tunnel_endpoint,json=tunnelEndpoint,proto3" json:"tunnel_endpoint,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Registry credentials for pulling Clank-hosted images (ADR-006).
+	RegistryUrl      string `protobuf:"bytes,8,opt,name=registry_url,json=registryUrl,proto3" json:"registry_url,omitempty"` // e.g. "registry.clank.host"
+	RegistryUsername string `protobuf:"bytes,9,opt,name=registry_username,json=registryUsername,proto3" json:"registry_username,omitempty"`
+	RegistryPassword string `protobuf:"bytes,10,opt,name=registry_password,json=registryPassword,proto3" json:"registry_password,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *EnrollResponse) Reset() {
@@ -272,6 +276,27 @@ func (x *EnrollResponse) GetAuthToken() string {
 func (x *EnrollResponse) GetTunnelEndpoint() string {
 	if x != nil {
 		return x.TunnelEndpoint
+	}
+	return ""
+}
+
+func (x *EnrollResponse) GetRegistryUrl() string {
+	if x != nil {
+		return x.RegistryUrl
+	}
+	return ""
+}
+
+func (x *EnrollResponse) GetRegistryUsername() string {
+	if x != nil {
+		return x.RegistryUsername
+	}
+	return ""
+}
+
+func (x *EnrollResponse) GetRegistryPassword() string {
+	if x != nil {
+		return x.RegistryPassword
 	}
 	return ""
 }
@@ -2835,7 +2860,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rEnrollRequest\x12\x14\n" +
 	"\x05token\x18\x01 \x01(\tR\x05token\x125\n" +
 	"\vsystem_info\x18\x02 \x01(\v2\x14.clank.v1.SystemInfoR\n" +
-	"systemInfo\"\xf3\x01\n" +
+	"systemInfo\"\xf0\x02\n" +
 	"\x0eEnrollResponse\x12\x1b\n" +
 	"\tserver_id\x18\x01 \x01(\tR\bserverId\x12\x1f\n" +
 	"\vclient_cert\x18\x02 \x01(\fR\n" +
@@ -2846,7 +2871,11 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rgrpc_endpoint\x18\x05 \x01(\tR\fgrpcEndpoint\x12\x1d\n" +
 	"\n" +
 	"auth_token\x18\x06 \x01(\tR\tauthToken\x12'\n" +
-	"\x0ftunnel_endpoint\x18\a \x01(\tR\x0etunnelEndpoint\"\xfb\x02\n" +
+	"\x0ftunnel_endpoint\x18\a \x01(\tR\x0etunnelEndpoint\x12!\n" +
+	"\fregistry_url\x18\b \x01(\tR\vregistryUrl\x12+\n" +
+	"\x11registry_username\x18\t \x01(\tR\x10registryUsername\x12+\n" +
+	"\x11registry_password\x18\n" +
+	" \x01(\tR\x10registryPassword\"\xfb\x02\n" +
 	"\n" +
 	"SystemInfo\x12\x1a\n" +
 	"\bhostname\x18\x01 \x01(\tR\bhostname\x12\x0e\n" +

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -352,6 +353,16 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		})
 	}
 
+	// Provide registry auth if the image is from the Clank registry (ADR-006).
+	var registryAuth *docker.RegistryAuth
+	if h.cfg.RegistryURL != "" && h.cfg.RegistryUsername != "" &&
+		strings.HasPrefix(imageTag, h.cfg.RegistryURL+"/") {
+		registryAuth = &docker.RegistryAuth{
+			Username: h.cfg.RegistryUsername,
+			Password: h.cfg.RegistryPassword,
+		}
+	}
+
 	deployResult, err := h.deployer.Deploy(ctx, deploy.DeployOpts{
 		DeploymentID:     deployID,
 		ServiceSlug:      cmd.GetServiceSlug(),
@@ -369,6 +380,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		Volumes:          volumes,
 		ContainerCommand: cmd.GetContainerCommand(),
 		CompanionSlugs:   cmd.GetCompanionSlugs(),
+		RegistryAuth:     registryAuth,
 		OnLog:            buildLog,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)

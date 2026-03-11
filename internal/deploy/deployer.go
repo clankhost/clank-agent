@@ -168,6 +168,7 @@ type DeployOpts struct {
 	Volumes          []docker.VolumeMount // Persistent volume mounts
 	ContainerCommand []string             // Docker CMD override from the API
 	CompanionSlugs   []string             // Companion service slugs to wait for before starting
+	RegistryAuth     *docker.RegistryAuth // Auth for registry pulls (ADR-006)
 	OnLog            func(string)         // Optional: streams deploy log lines to UI
 }
 
@@ -282,7 +283,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		if opts.OnLog != nil {
 			opts.OnLog(fmt.Sprintf("Pulling image %s...", opts.ImageTag))
 		}
-		if err := d.docker.PullImage(ctx, opts.ImageTag, func(msg string) {
+		if err := d.docker.PullImage(ctx, opts.ImageTag, opts.RegistryAuth, func(msg string) {
 			log.Printf("  [pull] %s", msg)
 			if opts.OnLog != nil {
 				opts.OnLog(msg)

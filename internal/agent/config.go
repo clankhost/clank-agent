@@ -18,6 +18,11 @@ type Config struct {
 	AuthToken    string `yaml:"auth_token,omitempty"` // JWT for tunnel mode
 	TunnelToken  string `yaml:"tunnel_token,omitempty"`
 	TunnelID     string `yaml:"tunnel_id,omitempty"`
+
+	// Registry credentials for pulling Clank-hosted images (ADR-006).
+	RegistryURL      string `yaml:"registry_url,omitempty"`
+	RegistryUsername string `yaml:"registry_username,omitempty"`
+	RegistryPassword string `yaml:"registry_password,omitempty"`
 }
 
 // DefaultConfigDir returns the platform-appropriate config directory.

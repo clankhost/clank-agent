@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	goarchive "github.com/moby/go-archive"
@@ -37,11 +39,35 @@ func NewManager() (*Manager, error) {
 	return &Manager{cli: cli}, nil
 }
 
+// RegistryAuth holds credentials for authenticating with a Docker registry.
+type RegistryAuth struct {
+	Username string
+	Password string
+}
+
+// encodeRegistryAuth encodes registry credentials as a base64 JSON string
+// for the Docker API's X-Registry-Auth header.
+func encodeRegistryAuth(auth *RegistryAuth) string {
+	if auth == nil || (auth.Username == "" && auth.Password == "") {
+		return ""
+	}
+	cfg := registry.AuthConfig{
+		Username: auth.Username,
+		Password: auth.Password,
+	}
+	jsonBytes, _ := json.Marshal(cfg)
+	return base64.URLEncoding.EncodeToString(jsonBytes)
+}
+
 // PullImage pulls a Docker image, logging progress.
-func (m *Manager) PullImage(ctx context.Context, img string, onLog func(string)) error {
+// If auth is non-nil, the credentials are sent with the pull request.
+func (m *Manager) PullImage(ctx context.Context, img string, auth *RegistryAuth, onLog func(string)) error {
 	onLog(fmt.Sprintf("Pulling image %s...", img))
 
-	reader, err := m.cli.ImagePull(ctx, img, image.PullOptions{})
+	opts := image.PullOptions{
+		RegistryAuth: encodeRegistryAuth(auth),
+	}
+	reader, err := m.cli.ImagePull(ctx, img, opts)
 	if err != nil {
 		return fmt.Errorf("pulling image %s: %w", img, err)
 	}

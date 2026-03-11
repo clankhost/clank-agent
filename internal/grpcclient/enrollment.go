@@ -111,13 +111,16 @@ func EnrollTunnel(endpoint, token string, info *sysinfo.Info) (*EnrollResponse, 
 	}
 
 	return &EnrollResponse{
-		ServerId:       restResp.ServerID,
-		ClientCert:     clientCert,
-		ClientKey:      clientKey,
-		CaCert:         caCert,
-		GrpcEndpoint:   restResp.GRPCEndpoint,
-		AuthToken:      restResp.AuthToken,
-		TunnelEndpoint: restResp.TunnelEndpoint,
+		ServerId:         restResp.ServerID,
+		ClientCert:       clientCert,
+		ClientKey:        clientKey,
+		CaCert:           caCert,
+		GrpcEndpoint:     restResp.GRPCEndpoint,
+		AuthToken:        restResp.AuthToken,
+		TunnelEndpoint:   restResp.TunnelEndpoint,
+		RegistryUrl:      restResp.RegistryURL,
+		RegistryUsername: restResp.RegistryUsername,
+		RegistryPassword: restResp.RegistryPassword,
 	}, nil
 }
 
@@ -139,13 +142,16 @@ type restEnrollRequest struct {
 }
 
 type restEnrollResponse struct {
-	ServerID       string `json:"server_id"`
-	ClientCert     string `json:"client_cert"`
-	ClientKey      string `json:"client_key"`
-	CACert         string `json:"ca_cert"`
-	GRPCEndpoint   string `json:"grpc_endpoint"`
-	AuthToken      string `json:"auth_token"`
-	TunnelEndpoint string `json:"tunnel_endpoint"`
+	ServerID         string `json:"server_id"`
+	ClientCert       string `json:"client_cert"`
+	ClientKey        string `json:"client_key"`
+	CACert           string `json:"ca_cert"`
+	GRPCEndpoint     string `json:"grpc_endpoint"`
+	AuthToken        string `json:"auth_token"`
+	TunnelEndpoint   string `json:"tunnel_endpoint"`
+	RegistryURL      string `json:"registry_url"`
+	RegistryUsername string `json:"registry_username"`
+	RegistryPassword string `json:"registry_password"`
 }
 
 func callEnrollRPC(conn *grpc.ClientConn, token string, info *sysinfo.Info) (*EnrollResponse, error) {

@@ -40,7 +40,7 @@ func (m *Manager) EnsureTraefik(ctx context.Context, publicIP string) error {
 	log.Println("Starting Traefik...")
 
 	// Pull traefik image
-	if err := m.PullImage(ctx, traefikImage, func(msg string) {
+	if err := m.PullImage(ctx, traefikImage, nil, func(msg string) {
 		log.Printf("  %s", msg)
 	}); err != nil {
 		return fmt.Errorf("pulling traefik image: %w", err)
@@ -145,7 +145,7 @@ func (m *Manager) ReconfigureTraefikACME(ctx context.Context, publicIP string) e
 
 	log.Println("Starting Traefik with ACME (Let's Encrypt)...")
 
-	if err := m.PullImage(ctx, traefikImage, func(msg string) {
+	if err := m.PullImage(ctx, traefikImage, nil, func(msg string) {
 		log.Printf("  %s", msg)
 	}); err != nil {
 		return fmt.Errorf("pulling traefik image: %w", err)
