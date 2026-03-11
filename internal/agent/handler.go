@@ -368,6 +368,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		LANIPs:           hostIPs,
 		Volumes:          volumes,
 		ContainerCommand: cmd.GetContainerCommand(),
+		CompanionSlugs:   cmd.GetCompanionSlugs(),
 		OnLog:            buildLog,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)

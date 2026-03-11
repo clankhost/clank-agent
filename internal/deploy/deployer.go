@@ -167,6 +167,7 @@ type DeployOpts struct {
 	LANIPs           []string             // Agent LAN IPs for sslip.io routing
 	Volumes          []docker.VolumeMount // Persistent volume mounts
 	ContainerCommand []string             // Docker CMD override from the API
+	CompanionSlugs   []string             // Companion service slugs to wait for before starting
 	OnLog            func(string)         // Optional: streams deploy log lines to UI
 }
 
@@ -192,6 +193,61 @@ type DeployResult struct {
 }
 
 var safeDomainRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?$`)
+
+// waitForCompanions blocks until all companion containers are running and healthy.
+// Polls every 3s, times out after 120s. Returns nil if all companions are ready.
+func (d *Deployer) waitForCompanions(ctx context.Context, slugs []string, onProgress ProgressFunc, onLog func(string)) error {
+	if len(slugs) == 0 {
+		return nil
+	}
+
+	const pollInterval = 3 * time.Second
+	const timeout = 120 * time.Second
+	deadline := time.Now().Add(timeout)
+
+	onProgress("deploying", fmt.Sprintf("Waiting for %d companion service(s) to start...", len(slugs)), "", "")
+	if onLog != nil {
+		onLog(fmt.Sprintf("Waiting for companion services: %v", slugs))
+	}
+
+	for {
+		allReady := true
+		for _, slug := range slugs {
+			id, _, err := d.docker.FindContainerByLabel(ctx, "clank.service_slug", slug)
+			if err != nil || id == "" {
+				allReady = false
+				continue
+			}
+
+			// Container is running — check Docker HEALTHCHECK if present
+			health := d.docker.GetHealthStatus(ctx, id)
+			if health == "starting" || health == "unhealthy" {
+				allReady = false
+				continue
+			}
+			// health == "" (no healthcheck) or "healthy" → ready
+		}
+
+		if allReady {
+			msg := fmt.Sprintf("All %d companion service(s) are ready", len(slugs))
+			onProgress("deploying", msg, "", "")
+			if onLog != nil {
+				onLog(msg)
+			}
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("companion services %v did not become ready within %s", slugs, timeout)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
 
 // Deploy starts a container with Traefik labels and runs health checks.
 // Returns a DeployResult (always non-nil, even on error) and an error.
@@ -334,6 +390,14 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 				StartPeriod: dbHC.startPeriod,
 			}
 			log.Printf("Injecting Docker HEALTHCHECK for %s: %v", opts.ImageTag, dbHC.test)
+		}
+	}
+
+	// Wait for companion services to be running+healthy before starting.
+	// This ensures databases/caches are ready when the primary app starts.
+	if len(opts.CompanionSlugs) > 0 {
+		if err := d.waitForCompanions(ctx, opts.CompanionSlugs, onProgress, opts.OnLog); err != nil {
+			return result, fmt.Errorf("waiting for companions: %w", err)
 		}
 	}
 

@@ -1474,8 +1474,10 @@ type DeployCommand struct {
 	VolumeMounts []*VolumeMount `protobuf:"bytes,17,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
 	// Docker CMD override. If set, replaces the image's default CMD.
 	ContainerCommand []string `protobuf:"bytes,18,rep,name=container_command,json=containerCommand,proto3" json:"container_command,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Slugs of companion services that must be running+healthy before starting.
+	CompanionSlugs []string `protobuf:"bytes,19,rep,name=companion_slugs,json=companionSlugs,proto3" json:"companion_slugs,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *DeployCommand) Reset() {
@@ -1630,6 +1632,13 @@ func (x *DeployCommand) GetVolumeMounts() []*VolumeMount {
 func (x *DeployCommand) GetContainerCommand() []string {
 	if x != nil {
 		return x.ContainerCommand
+	}
+	return nil
+}
+
+func (x *DeployCommand) GetCompanionSlugs() []string {
+	if x != nil {
+		return x.CompanionSlugs
 	}
 	return nil
 }
@@ -2930,7 +2939,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\tsignature\x18\x05 \x01(\tR\tsignature\"N\n" +
 	"\fTunnelConfig\x12!\n" +
 	"\ftunnel_token\x18\x01 \x01(\tR\vtunnelToken\x12\x1b\n" +
-	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xc9\x06\n" +
+	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xf2\x06\n" +
 	"\rDeployCommand\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12!\n" +
 	"\fservice_slug\x18\x02 \x01(\tR\vserviceSlug\x12\x1b\n" +
@@ -2950,7 +2959,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x0fproject_network\x18\x0f \x01(\tR\x0eprojectNetwork\x12A\n" +
 	"\x10active_endpoints\x18\x10 \x03(\v2\x16.clank.v1.EndpointInfoR\x0factiveEndpoints\x12:\n" +
 	"\rvolume_mounts\x18\x11 \x03(\v2\x15.clank.v1.VolumeMountR\fvolumeMounts\x12+\n" +
-	"\x11container_command\x18\x12 \x03(\tR\x10containerCommand\x1a:\n" +
+	"\x11container_command\x18\x12 \x03(\tR\x10containerCommand\x12'\n" +
+	"\x0fcompanion_slugs\x18\x13 \x03(\tR\x0ecompanionSlugs\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
