@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	dockertypes "github.com/docker/docker/api/types"
@@ -386,6 +387,61 @@ func (m *Manager) ListContainersByLabel(ctx context.Context, key, value string) 
 		})
 	}
 	return result, nil
+}
+
+// GetImageDigest returns the sha256 digest of a local image.
+func (m *Manager) GetImageDigest(ctx context.Context, imageRef string) (string, error) {
+	inspect, _, err := m.cli.ImageInspectWithRaw(ctx, imageRef)
+	if err != nil {
+		return "", fmt.Errorf("inspecting image %s: %w", imageRef, err)
+	}
+	return inspect.ID, nil
+}
+
+// PruneServiceImages removes old build images for a service, keeping the
+// most recent `keep` images. Best-effort: skips images in use.
+// Returns the number of images pruned.
+func (m *Manager) PruneServiceImages(ctx context.Context, slug string, keep int) (int, error) {
+	tagPrefix := fmt.Sprintf("clank-%s:", slug)
+	images, err := m.cli.ImageList(ctx, image.ListOptions{All: false})
+	if err != nil {
+		return 0, fmt.Errorf("listing images: %w", err)
+	}
+
+	// Collect matching images with their creation time
+	type taggedImage struct {
+		tag     string
+		created int64
+	}
+	var matched []taggedImage
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, tagPrefix) {
+				matched = append(matched, taggedImage{tag: tag, created: img.Created})
+			}
+		}
+	}
+
+	if len(matched) <= keep {
+		return 0, nil
+	}
+
+	// Sort by creation time descending (newest first)
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].created > matched[j].created
+	})
+
+	pruned := 0
+	for _, img := range matched[keep:] {
+		_, err := m.cli.ImageRemove(ctx, img.tag, image.RemoveOptions{Force: false})
+		if err != nil {
+			fmt.Printf("Warning: failed to prune image %s: %v\n", img.tag, err)
+			continue
+		}
+		fmt.Printf("Pruned old image %s\n", img.tag)
+		pruned++
+	}
+	return pruned, nil
 }
 
 // RemoveImages removes all images matching a tag prefix (e.g. "clank-myapp:").

@@ -795,6 +795,8 @@ type DeployProgress struct {
 	Introspection *ContainerIntrospection `protobuf:"bytes,9,opt,name=introspection,proto3" json:"introspection,omitempty"`
 	// Effective port used (may differ from configured port due to auto-fill) (Phase D)
 	EffectivePort int32 `protobuf:"varint,10,opt,name=effective_port,json=effectivePort,proto3" json:"effective_port,omitempty"`
+	// sha256 digest of the deployed image (ADR-006 image tracking)
+	ImageDigest   string `protobuf:"bytes,11,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -897,6 +899,13 @@ func (x *DeployProgress) GetEffectivePort() int32 {
 		return x.EffectivePort
 	}
 	return 0
+}
+
+func (x *DeployProgress) GetImageDigest() string {
+	if x != nil {
+		return x.ImageDigest
+	}
+	return ""
 }
 
 // Container introspection data collected during deployment.
@@ -2925,7 +2934,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\fcontainer_id\x18\x01 \x01(\tR\vcontainerId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x14\n" +
-	"\x05image\x18\x04 \x01(\tR\x05image\"\xf9\x02\n" +
+	"\x05image\x18\x04 \x01(\tR\x05image\"\x9c\x03\n" +
 	"\x0eDeployProgress\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
@@ -2937,7 +2946,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\fstartup_logs\x18\b \x01(\tR\vstartupLogs\x12F\n" +
 	"\rintrospection\x18\t \x01(\v2 .clank.v1.ContainerIntrospectionR\rintrospection\x12%\n" +
 	"\x0eeffective_port\x18\n" +
-	" \x01(\x05R\reffectivePort\"\x82\x03\n" +
+	" \x01(\x05R\reffectivePort\x12!\n" +
+	"\fimage_digest\x18\v \x01(\tR\vimageDigest\"\x82\x03\n" +
 	"\x16ContainerIntrospection\x12C\n" +
 	"\x10discovered_ports\x18\x01 \x03(\v2\x18.clank.v1.DiscoveredPortR\x0fdiscoveredPorts\x12!\n" +
 	"\fcontainer_ip\x18\x02 \x01(\tR\vcontainerIp\x12\x1a\n" +

@@ -185,12 +185,13 @@ type HealthConfig struct {
 // Always returned (even partial on failure) so the caller can report
 // startup logs, port info, etc. back to the control plane.
 type DeployResult struct {
-	ImageMeta    *docker.ImageMeta
-	Inspection   *docker.ContainerInspection
-	StartupLogs  string
-	Ports        []docker.DiscoveredPort
+	ImageMeta     *docker.ImageMeta
+	Inspection    *docker.ContainerInspection
+	StartupLogs   string
+	Ports         []docker.DiscoveredPort
 	EffectivePort int
-	IsHTTP       bool // whether the primary port speaks HTTP
+	IsHTTP        bool   // whether the primary port speaks HTTP
+	ImageDigest   string // sha256 digest of the deployed image
 }
 
 var safeDomainRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.\-]*[a-zA-Z0-9])?$`)
@@ -434,6 +435,14 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		log.Printf("Container %s started on isolated project network %s (%s)", containerName, primaryNetwork, containerID[:12])
 	} else {
 		log.Printf("Container %s started on shared network %s (no project network set) (%s)", containerName, primaryNetwork, containerID[:12])
+	}
+
+	// Extract image digest for tracking (ADR-006)
+	if digest, err := d.docker.GetImageDigest(ctx, opts.ImageTag); err == nil {
+		result.ImageDigest = digest
+		log.Printf("Image digest: %s", digest)
+	} else {
+		log.Printf("Warning: failed to get image digest: %v", err)
 	}
 
 	// Connect Traefik to the project network so it can route to this container

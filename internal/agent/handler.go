@@ -222,6 +222,11 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 				dp.EffectivePort = int32(result.EffectivePort)
 			}
 
+			// Attach image digest (ADR-006)
+			if result.ImageDigest != "" {
+				dp.ImageDigest = result.ImageDigest
+			}
+
 			// Build ContainerIntrospection (Phase B)
 			dp.Introspection = buildIntrospectionProto(result)
 		}
@@ -394,20 +399,21 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		sendTerminalProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA, deployResult)
 	} else {
 		deploySuccess = true
-		// The deployer already called onProgress("active", ...) for intermediate
-		// progress. Send a terminal message with introspection attached.
-		// Note: the deployer's onProgress already reported "active" to the stream,
-		// but that message didn't have introspection. We don't re-send "active" here
-		// because the first one already transitioned the deployment state.
-		// Instead, we only attach introspection to failed deployments.
-		// For active deploys, the deployer's onProgress("active",...) suffices,
-		// but we want introspection too. Let's send it as part of the active message.
-		// We need to check if the deployer already sent the terminal "active".
-		// Since it did via onProgress, and we can't un-send, we send a supplementary
-		// message. However, the API ignores duplicate "active" transitions.
-		// So we send another "active" with introspection attached.
-		if deployResult != nil && (deployResult.Inspection != nil || len(deployResult.Ports) > 0 || deployResult.EffectivePort != int(cmd.GetPort())) {
+		// Send a supplementary "active" message with introspection and digest.
+		// The deployer already sent "active" via onProgress, but without extras.
+		// The API ignores duplicate "active" transitions but stores attached data.
+		if deployResult != nil && (deployResult.Inspection != nil || len(deployResult.Ports) > 0 || deployResult.EffectivePort != int(cmd.GetPort()) || deployResult.ImageDigest != "") {
 			sendTerminalProgress("active", "Deployment active (introspection attached)", "", "", imageTag, gitSHA, deployResult)
+		}
+
+		// Prune old local build images for this service (keep last 3).
+		// Only for git-build deploys (not pre-built image deploys).
+		if cmd.GetRepoUrl() != "" {
+			if pruned, err := h.docker.PruneServiceImages(ctx, slug, 3); err != nil {
+				log.Printf("Warning: image prune failed for %s: %v", slug, err)
+			} else if pruned > 0 {
+				log.Printf("Pruned %d old image(s) for service %s", pruned, slug)
+			}
 		}
 	}
 }
