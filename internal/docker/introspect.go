@@ -114,6 +114,19 @@ func (m *Manager) InspectContainer(ctx context.Context, containerID string) (*Co
 	return ci, nil
 }
 
+// GetHealthStatus returns the Docker HEALTHCHECK status of a container:
+// "healthy", "unhealthy", "starting", or "" if no healthcheck is configured.
+func (m *Manager) GetHealthStatus(ctx context.Context, containerID string) string {
+	inspect, err := m.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return ""
+	}
+	if inspect.State == nil || inspect.State.Health == nil {
+		return ""
+	}
+	return inspect.State.Health.Status
+}
+
 // GetStartupLogs returns the last N lines of container logs, capped at 32KB.
 // Strips Docker multiplexed stream headers (8-byte prefix per frame).
 func (m *Manager) GetStartupLogs(ctx context.Context, containerID string, lines int) (string, error) {

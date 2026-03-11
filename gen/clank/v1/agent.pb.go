@@ -1471,9 +1471,11 @@ type DeployCommand struct {
 	// Active endpoints for this service (used for Traefik label generation).
 	ActiveEndpoints []*EndpointInfo `protobuf:"bytes,16,rep,name=active_endpoints,json=activeEndpoints,proto3" json:"active_endpoints,omitempty"`
 	// Persistent volume mounts for the container.
-	VolumeMounts  []*VolumeMount `protobuf:"bytes,17,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	VolumeMounts []*VolumeMount `protobuf:"bytes,17,rep,name=volume_mounts,json=volumeMounts,proto3" json:"volume_mounts,omitempty"`
+	// Docker CMD override. If set, replaces the image's default CMD.
+	ContainerCommand []string `protobuf:"bytes,18,rep,name=container_command,json=containerCommand,proto3" json:"container_command,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *DeployCommand) Reset() {
@@ -1621,6 +1623,13 @@ func (x *DeployCommand) GetActiveEndpoints() []*EndpointInfo {
 func (x *DeployCommand) GetVolumeMounts() []*VolumeMount {
 	if x != nil {
 		return x.VolumeMounts
+	}
+	return nil
+}
+
+func (x *DeployCommand) GetContainerCommand() []string {
+	if x != nil {
+		return x.ContainerCommand
 	}
 	return nil
 }
@@ -2921,7 +2930,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\tsignature\x18\x05 \x01(\tR\tsignature\"N\n" +
 	"\fTunnelConfig\x12!\n" +
 	"\ftunnel_token\x18\x01 \x01(\tR\vtunnelToken\x12\x1b\n" +
-	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\x9c\x06\n" +
+	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xc9\x06\n" +
 	"\rDeployCommand\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12!\n" +
 	"\fservice_slug\x18\x02 \x01(\tR\vserviceSlug\x12\x1b\n" +
@@ -2940,7 +2949,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x0fresource_config\x18\x0e \x01(\v2\x18.clank.v1.ResourceConfigR\x0eresourceConfig\x12'\n" +
 	"\x0fproject_network\x18\x0f \x01(\tR\x0eprojectNetwork\x12A\n" +
 	"\x10active_endpoints\x18\x10 \x03(\v2\x16.clank.v1.EndpointInfoR\x0factiveEndpoints\x12:\n" +
-	"\rvolume_mounts\x18\x11 \x03(\v2\x15.clank.v1.VolumeMountR\fvolumeMounts\x1a:\n" +
+	"\rvolume_mounts\x18\x11 \x03(\v2\x15.clank.v1.VolumeMountR\fvolumeMounts\x12+\n" +
+	"\x11container_command\x18\x12 \x03(\tR\x10containerCommand\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +

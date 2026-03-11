@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/docker/docker/api/types/container"
 )
 
 // imageHandler defines auto-injection behavior for a known Docker image.
@@ -64,6 +65,64 @@ func generateHexToken(numBytes int) string {
 	return hex.EncodeToString(b)
 }
 
+// dbHealthcheck defines a Docker HEALTHCHECK to inject for known database images.
+type dbHealthcheck struct {
+	prefixes    []string
+	test        []string
+	interval    time.Duration
+	timeout     time.Duration
+	retries     int
+	startPeriod time.Duration
+}
+
+var dbHealthchecks = []dbHealthcheck{
+	{
+		prefixes:    []string{"postgres:", "library/postgres:", "docker.io/library/postgres:"},
+		test:        []string{"CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"},
+		interval:    3 * time.Second,
+		timeout:     3 * time.Second,
+		retries:     10,
+		startPeriod: 5 * time.Second,
+	},
+	{
+		prefixes:    []string{"mysql:", "library/mysql:", "docker.io/library/mysql:", "mariadb:", "library/mariadb:", "docker.io/library/mariadb:"},
+		test:        []string{"CMD-SHELL", "mysqladmin ping -h localhost --silent"},
+		interval:    3 * time.Second,
+		timeout:     3 * time.Second,
+		retries:     10,
+		startPeriod: 10 * time.Second,
+	},
+	{
+		prefixes:    []string{"redis:", "library/redis:", "docker.io/library/redis:"},
+		test:        []string{"CMD-SHELL", "redis-cli ping | grep -q PONG"},
+		interval:    2 * time.Second,
+		timeout:     2 * time.Second,
+		retries:     5,
+		startPeriod: 3 * time.Second,
+	},
+	{
+		prefixes:    []string{"mongo:", "library/mongo:", "docker.io/library/mongo:"},
+		test:        []string{"CMD-SHELL", "mongosh --eval 'db.runCommand(\"ping\").ok' --quiet || mongo --eval 'db.runCommand(\"ping\").ok' --quiet"},
+		interval:    3 * time.Second,
+		timeout:     3 * time.Second,
+		retries:     10,
+		startPeriod: 10 * time.Second,
+	},
+}
+
+// matchDBHealthcheck returns the healthcheck config for a known database image, or nil.
+func matchDBHealthcheck(imageTag string) *dbHealthcheck {
+	tag := strings.ToLower(imageTag)
+	for i := range dbHealthchecks {
+		for _, prefix := range dbHealthchecks[i].prefixes {
+			if strings.HasPrefix(tag, prefix) {
+				return &dbHealthchecks[i]
+			}
+		}
+	}
+	return nil
+}
+
 const servicesNetwork = "clank-services"
 
 // Default port assigned by the platform when user doesn't specify one.
@@ -105,9 +164,10 @@ type DeployOpts struct {
 	CPULimit        float64
 	MemoryLimitMB   int
 	ProjectNetwork  string
-	LANIPs          []string             // Agent LAN IPs for sslip.io routing
-	Volumes         []docker.VolumeMount // Persistent volume mounts
-	OnLog           func(string)         // Optional: streams deploy log lines to UI
+	LANIPs           []string             // Agent LAN IPs for sslip.io routing
+	Volumes          []docker.VolumeMount // Persistent volume mounts
+	ContainerCommand []string             // Docker CMD override from the API
+	OnLog            func(string)         // Optional: streams deploy log lines to UI
 }
 
 // HealthConfig mirrors the proto HealthCheckConfig.
@@ -221,17 +281,14 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 	injectEndpointEnvVars(opts.Env, opts.ImageTag, opts.Endpoints)
 
-	// OpenClaw on HTTP: add Traefik middleware to inject trusted-proxy auth header.
-	// This makes the gateway treat every request as pre-authenticated, bypassing
-	// the device identity check that fails without a browser secure context.
+	// OpenClaw: add Traefik middleware to inject trusted-proxy auth header.
+	// The gateway always runs with --auth trusted-proxy; without the
+	// X-Openclaw-User header it falls back to device identity which fails
+	// in browsers on plain HTTP and is unnecessary on HTTPS. Traefik
+	// terminates TLS and proxies internally, so it can inject the header
+	// regardless of whether the external connection uses HTTP or HTTPS.
 	if handler := matchesImageHandler(opts.ImageTag); handler != nil && handler.name == "openclaw" {
-		for _, ep := range opts.Endpoints {
-			u := resolveEndpointURL(ep)
-			if u != "" && !strings.HasPrefix(u, "https://") {
-				addOpenClawProxyAuthLabels(labels, opts.ServiceSlug)
-				break
-			}
-		}
+		addOpenClawProxyAuthLabels(labels, opts.ServiceSlug)
 	}
 
 	// Image handlers can specify minimum resource requirements. Upgrade
@@ -249,16 +306,35 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		}
 	}
 
-	// Extract CLANK_CONTAINER_CMD magic env var (used as Docker CMD override).
-	// Clear the image entrypoint so CMD runs as a standalone shell command,
-	// not appended to an image ENTRYPOINT that would mangle it.
+	// Container command override: proto-level takes precedence, then env var fallback.
 	var cmdOverride []string
 	var entrypointOverride []string
-	if cmdStr, ok := opts.Env["CLANK_CONTAINER_CMD"]; ok && cmdStr != "" {
+	if len(opts.ContainerCommand) > 0 {
+		cmdOverride = opts.ContainerCommand
+		entrypointOverride = []string{""} // Clear image ENTRYPOINT so CMD runs standalone
+		log.Printf("Using proto command override: %v", cmdOverride)
+	} else if cmdStr, ok := opts.Env["CLANK_CONTAINER_CMD"]; ok && cmdStr != "" {
+		// Legacy: CLANK_CONTAINER_CMD env var (used by image handlers)
 		cmdOverride = []string{"sh", "-c", cmdStr}
 		entrypointOverride = []string{""} // Docker convention: clear image ENTRYPOINT
 		delete(opts.Env, "CLANK_CONTAINER_CMD")
-		log.Printf("Using CMD override: %v", cmdOverride)
+		log.Printf("Using CMD override from env: %v", cmdOverride)
+	}
+
+	// Inject Docker HEALTHCHECK for known database images.
+	// Only inject if the image doesn't already define a HEALTHCHECK.
+	var injectedHealthcheck *container.HealthConfig
+	if dbHC := matchDBHealthcheck(opts.ImageTag); dbHC != nil {
+		if imageMeta == nil || imageMeta.Healthcheck == nil {
+			injectedHealthcheck = &container.HealthConfig{
+				Test:        dbHC.test,
+				Interval:    dbHC.interval,
+				Timeout:     dbHC.timeout,
+				Retries:     dbHC.retries,
+				StartPeriod: dbHC.startPeriod,
+			}
+			log.Printf("Injecting Docker HEALTHCHECK for %s: %v", opts.ImageTag, dbHC.test)
+		}
 	}
 
 	// Fix volume ownership for non-root images before starting the container
@@ -283,6 +359,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		Command:       cmdOverride,
 		Entrypoint:    entrypointOverride,
 		Volumes:       opts.Volumes,
+		Healthcheck:   injectedHealthcheck,
 	})
 	if err != nil {
 		return result, fmt.Errorf("starting container: %w", err)
@@ -438,7 +515,22 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	if primaryProtocol == "tcp" {
-		// TCP-only service (database, cache, etc.) — TCP connect = healthy
+		if injectedHealthcheck != nil {
+			// TCP port open, but we injected a HEALTHCHECK — wait for Docker to confirm healthy
+			log.Printf("TCP port %d responding, waiting for Docker HEALTHCHECK...", effectivePort)
+			if opts.OnLog != nil {
+				opts.OnLog("TCP port responding. Waiting for database health check...")
+			}
+			if err := d.waitForDockerHealthy(ctx, containerID, 60*time.Second, opts.OnLog); err != nil {
+				logs, _ := d.docker.GetStartupLogs(ctx, containerID, 100)
+				result.StartupLogs = logs
+				return result, fmt.Errorf("database health check failed: %w", err)
+			}
+			log.Println("Docker HEALTHCHECK passed — marking active")
+			onProgress("active", "Deployment active (database health check passed)", containerID[:12], containerName)
+			return result, nil
+		}
+		// No HEALTHCHECK — TCP connect = healthy (existing behavior)
 		log.Println("TCP-only service — connection successful, marking active")
 		onProgress("active", "Deployment active (TCP port responding)", containerID[:12], containerName)
 		return result, nil
@@ -447,12 +539,20 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Port is closed — wait and retry (slow startup)
 	if primaryProtocol == "closed" {
 		log.Printf("Primary port %d is closed, waiting for startup...", effectivePort)
-		retries := 3
+		retries := 6
 		interval := 10
 
-		// Image handlers know what their image needs for startup and
-		// take priority over API health-check defaults (which govern
-		// HTTP health checks, not port-open probing).
+		// Use health config retries/interval if higher than defaults.
+		// These fields also govern HTTP health checks, but for the port-open
+		// case they let users increase the startup timeout.
+		if hc.Retries > retries {
+			retries = hc.Retries
+		}
+		if hc.IntervalSeconds > interval {
+			interval = hc.IntervalSeconds
+		}
+
+		// Image handlers override for known-slow images.
 		if handler := matchesImageHandler(opts.ImageTag); handler != nil {
 			if handler.startupRetries > 0 {
 				retries = handler.startupRetries
@@ -462,10 +562,12 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 			}
 		}
 
-		// StartupGraceSeconds is the only user-facing knob for startup wait.
-		// If set, add it as initial sleep before probing begins.
+		// StartupGraceSeconds adds an initial sleep before probing begins.
 		if hc.StartupGraceSeconds > 0 {
 			log.Printf("Startup grace: waiting %ds before port probing...", hc.StartupGraceSeconds)
+			if opts.OnLog != nil {
+				opts.OnLog(fmt.Sprintf("Waiting %ds startup grace before probing port %d...", hc.StartupGraceSeconds, effectivePort))
+			}
 			select {
 			case <-ctx.Done():
 				return result, ctx.Err()
@@ -480,13 +582,47 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 				return result, ctx.Err()
 			case <-time.After(time.Duration(interval) * time.Second):
 			}
+
+			// Check container liveness — fail fast if container crashed
+			ci2, inspErr := d.docker.InspectContainer(ctx, containerID)
+			if inspErr == nil && (ci2.State == "exited" || ci2.State == "dead") {
+				result.Inspection = ci2
+				cLogs, logErr := d.docker.GetStartupLogs(ctx, containerID, 100)
+				if logErr == nil {
+					result.StartupLogs = cLogs
+				}
+				log.Printf("Container exited during startup wait (state=%s exit=%d oom=%v)", ci2.State, ci2.ExitCode, ci2.OOMKilled)
+				if stopErr := d.docker.StopAndRemove(ctx, containerID); stopErr != nil {
+					log.Printf("Warning: failed to remove container: %v", stopErr)
+				}
+				msg := fmt.Sprintf("Container exited during startup (exit code %d)", ci2.ExitCode)
+				if ci2.OOMKilled {
+					msg = "Container killed: out of memory (OOMKilled)"
+				}
+				return result, fmt.Errorf("%s", msg)
+			}
+
 			proto := docker.ProbePort(ctx, ip, effectivePort)
-			if proto == "http" || proto == "tcp" {
+			if proto == "http" || (proto == "tcp" && injectedHealthcheck == nil) {
 				log.Printf("Port %d now responding (%s) on attempt %d", effectivePort, proto, attempt)
 				onProgress("active", fmt.Sprintf("Deployment active (%s port responding, attempt %d)", proto, attempt), containerID[:12], containerName)
 				return result, nil
 			}
+			if proto == "tcp" && injectedHealthcheck != nil {
+				// TCP port open but we have an injected HEALTHCHECK — wait for Docker healthy
+				log.Printf("Port %d responding (TCP) on attempt %d, waiting for Docker HEALTHCHECK...", effectivePort, attempt)
+				if err := d.waitForDockerHealthy(ctx, containerID, 60*time.Second, opts.OnLog); err != nil {
+					logs, _ := d.docker.GetStartupLogs(ctx, containerID, 100)
+					result.StartupLogs = logs
+					return result, fmt.Errorf("database health check failed: %w", err)
+				}
+				onProgress("active", "Deployment active (database health check passed)", containerID[:12], containerName)
+				return result, nil
+			}
 			log.Printf("Port %d still closed (attempt %d/%d)", effectivePort, attempt, retries)
+			if opts.OnLog != nil {
+				opts.OnLog(fmt.Sprintf("Port %d still closed, container running (attempt %d/%d)", effectivePort, attempt, retries))
+			}
 		}
 
 		// Still closed — capture logs and fail
@@ -498,13 +634,44 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		if stopErr := d.docker.StopAndRemove(ctx, containerID); stopErr != nil {
 			log.Printf("Warning: failed to remove container: %v", stopErr)
 		}
-		return result, fmt.Errorf("port %d never opened after %d attempts", effectivePort, retries)
+		return result, fmt.Errorf("port %d never opened after %d attempts (~%ds total)", effectivePort, retries, retries*interval)
 	}
 
 	// Fallback: skip health checks
 	log.Println("Health check skipped (no path configured, port status unknown)")
 	onProgress("active", "Deployment active (health check skipped)", containerID[:12], containerName)
 	return result, nil
+}
+
+// waitForDockerHealthy polls Docker's health status until the container reports "healthy".
+func (d *Deployer) waitForDockerHealthy(ctx context.Context, containerID string, timeout time.Duration, onLog func(string)) error {
+	deadline := time.Now().Add(timeout)
+	attempt := 0
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+		attempt++
+
+		ci, err := d.docker.InspectContainer(ctx, containerID)
+		if err == nil && (ci.State == "exited" || ci.State == "dead") {
+			return fmt.Errorf("container exited (exit code %d)", ci.ExitCode)
+		}
+
+		health := d.docker.GetHealthStatus(ctx, containerID)
+		if health == "healthy" {
+			return nil
+		}
+		if health == "unhealthy" {
+			return fmt.Errorf("Docker HEALTHCHECK reports unhealthy")
+		}
+		if onLog != nil && attempt%3 == 0 {
+			onLog(fmt.Sprintf("Waiting for database health check (attempt %d, status: %s)...", attempt, health))
+		}
+	}
+	return fmt.Errorf("timed out waiting for Docker HEALTHCHECK to pass after %v", timeout)
 }
 
 // runHTTPHealthChecks performs traditional HTTP health checks and handles failure cleanup.
@@ -744,8 +911,9 @@ func generateEndpointLabels(labels map[string]string, serviceSlug string, port i
 
 // addOpenClawProxyAuthLabels adds a Traefik middleware that injects an
 // X-Openclaw-User header on every request. This makes the gateway treat the
-// connection as trusted-proxy-authenticated, bypassing the device identity
-// check that would otherwise fail on plain HTTP (no Web Crypto API).
+// connection as trusted-proxy-authenticated, bypassing device identity checks.
+// Applied to all OpenClaw deploys (HTTP and HTTPS) since the gateway always
+// runs with --auth trusted-proxy and Traefik can inject headers in both cases.
 func addOpenClawProxyAuthLabels(labels map[string]string, serviceSlug string) {
 	mwName := fmt.Sprintf("clank-%s-ocauth", serviceSlug)
 

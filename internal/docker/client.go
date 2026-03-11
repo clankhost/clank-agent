@@ -153,6 +153,9 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 	if opts.Entrypoint != nil {
 		config.Entrypoint = opts.Entrypoint
 	}
+	if opts.Healthcheck != nil {
+		config.Healthcheck = opts.Healthcheck
+	}
 
 	// Build volume mounts
 	var mounts []mount.Mount

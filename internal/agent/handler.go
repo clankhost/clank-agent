@@ -353,21 +353,22 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	}
 
 	deployResult, err := h.deployer.Deploy(ctx, deploy.DeployOpts{
-		DeploymentID:    deployID,
-		ServiceSlug:     cmd.GetServiceSlug(),
-		ImageTag:        imageTag,
-		Env:             cmd.GetEnvVars(),
-		Port:            deployPort,
-		Domains:         cmd.GetDomains(),
-		Endpoints:       endpoints,
-		HealthCheckPath: cmd.GetHealthCheckPath(),
-		HealthConfig:    healthConfig,
-		CPULimit:        cpuLimit,
-		MemoryLimitMB:   memoryLimitMB,
-		ProjectNetwork:  cmd.GetProjectNetwork(),
-		LANIPs:          hostIPs,
-		Volumes:         volumes,
-		OnLog:           buildLog,
+		DeploymentID:     deployID,
+		ServiceSlug:      cmd.GetServiceSlug(),
+		ImageTag:         imageTag,
+		Env:              cmd.GetEnvVars(),
+		Port:             deployPort,
+		Domains:          cmd.GetDomains(),
+		Endpoints:        endpoints,
+		HealthCheckPath:  cmd.GetHealthCheckPath(),
+		HealthConfig:     healthConfig,
+		CPULimit:         cpuLimit,
+		MemoryLimitMB:    memoryLimitMB,
+		ProjectNetwork:   cmd.GetProjectNetwork(),
+		LANIPs:           hostIPs,
+		Volumes:          volumes,
+		ContainerCommand: cmd.GetContainerCommand(),
+		OnLog:            buildLog,
 	}, func(status, message, containerID, containerName string) {
 		sendProgress(status, message, containerID, containerName, imageTag, gitSHA)
 	})
