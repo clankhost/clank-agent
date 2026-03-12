@@ -44,6 +44,9 @@ type EndpointHandler func(ctx context.Context, stream ConnectStream, cmd *clankv
 // BackupHandler handles backup commands.
 type BackupHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.BackupCommand)
 
+// PushImageHandler handles push-to-registry commands.
+type PushImageHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.PushImageCommand)
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
 	OnDeploy           DeployHandler
@@ -52,6 +55,7 @@ type CommandHandlers struct {
 	OnUpdate           UpdateHandler
 	OnEndpoint         EndpointHandler
 	OnBackup           BackupHandler
+	OnPushImage        PushImageHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -190,6 +194,19 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 						}
 					}()
 					handlers.OnBackup(ctx, stream, p.BackupCmd)
+				}()
+			}
+
+		case *clankv1.ControlMessage_PushImage:
+			log.Printf("Received push image command for deployment %s", p.PushImage.GetDeploymentId())
+			if handlers.OnPushImage != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in push image handler: %v", r)
+						}
+					}()
+					handlers.OnPushImage(ctx, stream, p.PushImage)
 				}()
 			}
 

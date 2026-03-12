@@ -120,6 +120,48 @@ func (m *Manager) PullImage(ctx context.Context, img string, auth *RegistryAuth,
 	return nil
 }
 
+// TagImage creates a new tag for an existing image.
+func (m *Manager) TagImage(ctx context.Context, source, target string) error {
+	return m.cli.ImageTag(ctx, source, target)
+}
+
+// PushImage pushes an image to a registry, logging progress.
+// If auth is non-nil, the credentials are sent with the push request.
+func (m *Manager) PushImage(ctx context.Context, img string, auth *RegistryAuth, onLog func(string)) error {
+	onLog(fmt.Sprintf("Pushing image %s...", img))
+
+	opts := image.PushOptions{
+		RegistryAuth: encodeRegistryAuth(auth),
+	}
+	reader, err := m.cli.ImagePush(ctx, img, opts)
+	if err != nil {
+		return fmt.Errorf("pushing image %s: %w", img, err)
+	}
+	defer reader.Close()
+
+	// Drain the push output (JSON stream — same format as pull)
+	dec := json.NewDecoder(reader)
+	for {
+		var msg struct {
+			Status   string `json:"status"`
+			Progress string `json:"progress"`
+			Error    string `json:"error"`
+		}
+		if err := dec.Decode(&msg); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return fmt.Errorf("reading push progress: %w", err)
+		}
+		if msg.Error != "" {
+			return fmt.Errorf("push error: %s", msg.Error)
+		}
+	}
+
+	onLog(fmt.Sprintf("Image %s pushed", img))
+	return nil
+}
+
 // BuildImage builds a Docker image from a context directory.
 func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile string, onLog func(string)) error {
 	onLog(fmt.Sprintf("Building image %s...", tag))

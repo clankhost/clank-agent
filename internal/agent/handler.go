@@ -819,3 +819,64 @@ func (h *CommandHandler) HandleBackup(ctx context.Context, stream grpcclient.Con
 		h.queuePendingResult(msg)
 	}
 }
+
+// HandlePushImage tags a local image and pushes it to the Clank registry.
+func (h *CommandHandler) HandlePushImage(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.PushImageCommand) {
+	log.Printf("Push image: deployment=%s source=%s target=%s",
+		cmd.DeploymentId, cmd.SourceImage, cmd.TargetImage)
+
+	sendResult := func(success bool, errMsg, digest string) {
+		msg := &clankv1.AgentMessage{
+			Payload: &clankv1.AgentMessage_PushImageResult{
+				PushImageResult: &clankv1.PushImageResult{
+					DeploymentId: cmd.DeploymentId,
+					Success:      success,
+					ErrorMessage: errMsg,
+					ImageDigest:  digest,
+				},
+			},
+		}
+		if err := stream.Send(msg); err != nil {
+			log.Printf("Failed to send push result: %v (queuing)", err)
+			h.queuePendingResult(msg)
+		}
+	}
+
+	// Resolve registry auth — prefer command-supplied, fallback to config.
+	var auth *docker.RegistryAuth
+	if cmd.RegistryAuth != "" {
+		decoded := docker.DecodeRegistryAuth(cmd.RegistryAuth)
+		if decoded != nil {
+			auth = decoded
+		}
+	}
+	if auth == nil && h.cfg.RegistryUsername != "" {
+		auth = &docker.RegistryAuth{
+			Username: h.cfg.RegistryUsername,
+			Password: h.cfg.RegistryPassword,
+		}
+	}
+
+	onLog := func(msg string) { log.Printf("[push] %s", msg) }
+
+	// Tag local image with registry target
+	if err := h.docker.TagImage(ctx, cmd.SourceImage, cmd.TargetImage); err != nil {
+		sendResult(false, fmt.Sprintf("tag failed: %v", err), "")
+		return
+	}
+
+	// Push to registry
+	if err := h.docker.PushImage(ctx, cmd.TargetImage, auth, onLog); err != nil {
+		sendResult(false, fmt.Sprintf("push failed: %v", err), "")
+		return
+	}
+
+	// Get digest of pushed image
+	digest, err := h.docker.GetImageDigest(ctx, cmd.TargetImage)
+	if err != nil {
+		log.Printf("Warning: push succeeded but digest lookup failed: %v", err)
+		digest = ""
+	}
+
+	sendResult(true, "", digest)
+}

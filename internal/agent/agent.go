@@ -184,6 +184,7 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 		OnUpdate:           a.handler.HandleUpdate,
 		OnEndpoint:         a.handler.HandleEndpoint,
 		OnBackup:           a.handler.HandleBackup,
+		OnPushImage:        a.handler.HandlePushImage,
 	}
 	go func() {
 		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)
