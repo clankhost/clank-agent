@@ -251,6 +251,12 @@ func (d *Deployer) waitForCompanions(ctx context.Context, slugs []string, onProg
 	}
 }
 
+// shouldBlueGreen returns true when a deploy can safely run both old and new
+// containers in parallel (explicit health check path, no shared volumes).
+func shouldBlueGreen(opts DeployOpts) bool {
+	return opts.HealthConfig.Path != "" && len(opts.Volumes) == 0
+}
+
 // Deploy starts a container with Traefik labels and runs health checks.
 // Returns a DeployResult (always non-nil, even on error) and an error.
 func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress ProgressFunc) (*DeployResult, error) {
@@ -267,16 +273,27 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		return result, fmt.Errorf("ensuring network: %w", err)
 	}
 
-	// Stop old container for this service slug (if any)
+	// Find old container for this service slug (if any).
+	// Blue-green: keep old running until new passes health checks.
+	// Recreate: stop old immediately (databases, volumes, no health path).
 	oldID, oldName, err := d.docker.FindContainerByLabel(ctx, "clank.service_slug", opts.ServiceSlug)
 	if err != nil {
 		log.Printf("Warning: could not search for old container: %v", err)
 	}
-	if oldID != "" {
-		log.Printf("Stopping old container %s (%s)", oldName, oldID[:12])
+
+	useBlueGreen := shouldBlueGreen(opts) && oldID != ""
+
+	if oldID != "" && !useBlueGreen {
+		// Recreate strategy: stop old before starting new
+		log.Printf("Stopping old container %s (%s) [recreate]", oldName, oldID[:12])
 		if err := d.docker.StopAndRemove(ctx, oldID); err != nil {
 			log.Printf("Warning: failed to remove old container: %v", err)
 		}
+		oldID = "" // Already cleaned up
+	}
+	if useBlueGreen {
+		log.Printf("Blue-green deploy: old container %s (%s) stays up until new passes health checks", oldName, oldID[:12])
+		onProgress("deploying", "Starting new container (current version remains active)", "", "")
 	}
 
 	// Pull image if not locally built
@@ -322,7 +339,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Generate Traefik labels using the effective port.
 	// isHTTP defaults to true (assume HTTP until probing proves otherwise).
 	isHTTP := true
-	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, effectivePort, opts.Endpoints, opts.LANIPs, isHTTP)
+	labels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, effectivePort, opts.Endpoints, opts.LANIPs, isHTTP, opts.HealthConfig.Path)
 
 	// Tell Traefik which network to use for reaching this container
 	if opts.ProjectNetwork != "" {
@@ -571,7 +588,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// If primary port is TCP-only (not HTTP), regenerate labels without Traefik routing
 	if !isHTTP && primaryProtocol == "tcp" {
 		log.Printf("Primary port is TCP-only — disabling Traefik HTTP routing for this service")
-		newLabels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, effectivePort, opts.Endpoints, opts.LANIPs, false)
+		newLabels := generateTraefikLabels(opts.DeploymentID, opts.ServiceSlug, opts.Domains, effectivePort, opts.Endpoints, opts.LANIPs, false, opts.HealthConfig.Path)
 		if opts.ProjectNetwork != "" {
 			newLabels["traefik.docker.network"] = opts.ProjectNetwork
 		}
@@ -586,9 +603,28 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// === Phase B: Smart health checks ===
 	hc := opts.HealthConfig
 
-	// If health check path is explicitly set, use existing behavior
+	// If health check path is explicitly set, run health checks
 	if hc.Path != "" {
-		return d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress, opts.OnLog)
+		result, err := d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress, opts.OnLog)
+		if err != nil {
+			// Health check failed. In blue-green mode, old container is still
+			// serving traffic — runHTTPHealthChecks already stopped the new one.
+			if useBlueGreen {
+				log.Printf("Blue-green deploy failed: old container %s continues serving", oldName)
+			}
+			return result, err
+		}
+		// Health check passed — clean up old container if blue-green
+		if useBlueGreen && oldID != "" {
+			// Brief delay for Traefik to fully route to new container
+			time.Sleep(2 * time.Second)
+			log.Printf("Blue-green success: stopping old container %s (%s)", oldName, oldID[:12])
+			if stopErr := d.docker.StopAndRemove(ctx, oldID); stopErr != nil {
+				log.Printf("Warning: failed to remove old container: %v", stopErr)
+			}
+			onProgress("deploying", "Traffic switched to new version", "", "")
+		}
+		return result, nil
 	}
 
 	// No explicit path — use smart detection
@@ -891,7 +927,7 @@ func checkHTTPHealth(url string, timeoutSec int) bool {
 	return resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
-func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int, endpoints []EndpointInfo, lanIPs []string, isHTTP bool) map[string]string {
+func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int, endpoints []EndpointInfo, lanIPs []string, isHTTP bool, healthCheckPath ...string) map[string]string {
 	labels := map[string]string{
 		"clank.managed":       "true",
 		"clank.service_slug":  serviceSlug,
@@ -909,6 +945,18 @@ func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, p
 	// Shared service port
 	svcName := "clank-" + serviceSlug
 	labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.server.port", svcName)] = fmt.Sprintf("%d", port)
+
+	// Traefik-level health check: prevents routing to unready containers
+	// during blue-green deploys (Traefik only routes after its own probe passes).
+	hcPath := ""
+	if len(healthCheckPath) > 0 {
+		hcPath = healthCheckPath[0]
+	}
+	if hcPath != "" {
+		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.path", svcName)] = hcPath
+		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.interval", svcName)] = "5s"
+		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.timeout", svcName)] = "3s"
+	}
 
 	// Always generate sslip.io / localhost labels for basic accessibility
 	generateLegacyLabels(labels, serviceSlug, domains, lanIPs)

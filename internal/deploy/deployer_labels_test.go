@@ -3,6 +3,8 @@ package deploy
 import (
 	"strings"
 	"testing"
+
+	"github.com/anaremore/clank/apps/agent/internal/docker"
 )
 
 // ── generateLegacyLabels ────────────────────────────────────────────────
@@ -299,6 +301,73 @@ func TestGenerateTraefikLabels_WithEndpoints(t *testing.T) {
 	}
 }
 
+
+// ── Traefik health check labels (blue-green deploy support) ─────────────
+
+func TestGenerateTraefikLabels_HealthCheckLabels(t *testing.T) {
+	labels := generateTraefikLabels("abc123", "myapp", nil, 8080, nil, nil, true, "/health")
+	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.path", "/health")
+	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.interval", "5s")
+	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.timeout", "3s")
+}
+
+func TestGenerateTraefikLabels_NoHealthCheckLabelsWhenEmpty(t *testing.T) {
+	labels := generateTraefikLabels("abc123", "myapp", nil, 8080, nil, nil, true)
+	if _, ok := labels["traefik.http.services.clank-myapp.loadbalancer.healthcheck.path"]; ok {
+		t.Error("health check labels should not be set when path is empty")
+	}
+}
+
+func TestGenerateTraefikLabels_NoHealthCheckLabelsForEmptyString(t *testing.T) {
+	labels := generateTraefikLabels("abc123", "myapp", nil, 8080, nil, nil, true, "")
+	if _, ok := labels["traefik.http.services.clank-myapp.loadbalancer.healthcheck.path"]; ok {
+		t.Error("health check labels should not be set for empty string path")
+	}
+}
+
+func TestGenerateTraefikLabels_HealthCheckWithEndpoints(t *testing.T) {
+	eps := []EndpointInfo{
+		{EndpointID: "ep1", Provider: "public_direct", Hostname: "app.example.com", TLSMode: "lets_encrypt_http01"},
+	}
+	labels := generateTraefikLabels("deploy-1", "webapp", nil, 3000, eps, nil, true, "/healthz")
+	// Health check labels should coexist with endpoint labels
+	assertLabel(t, labels, "traefik.http.services.clank-webapp.loadbalancer.healthcheck.path", "/healthz")
+	if _, ok := labels["traefik.http.routers.clank-webapp-ep0-secure.rule"]; !ok {
+		t.Error("endpoint labels should still be present")
+	}
+}
+
+// ── shouldBlueGreen ─────────────────────────────────────────────────────
+
+func TestShouldBlueGreen_WithHealthNoVolumes(t *testing.T) {
+	opts := DeployOpts{
+		HealthConfig: HealthConfig{Path: "/health"},
+		Volumes:      nil,
+	}
+	if !shouldBlueGreen(opts) {
+		t.Error("expected blue-green for health-checked service without volumes")
+	}
+}
+
+func TestShouldBlueGreen_NoHealthCheck(t *testing.T) {
+	opts := DeployOpts{
+		HealthConfig: HealthConfig{Path: ""},
+		Volumes:      nil,
+	}
+	if shouldBlueGreen(opts) {
+		t.Error("expected recreate for service without health check")
+	}
+}
+
+func TestShouldBlueGreen_WithVolumes(t *testing.T) {
+	opts := DeployOpts{
+		HealthConfig: HealthConfig{Path: "/health"},
+		Volumes:      []docker.VolumeMount{{Name: "data", MountPath: "/data"}},
+	}
+	if shouldBlueGreen(opts) {
+		t.Error("expected recreate for service with volumes even if health check exists")
+	}
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────
 
