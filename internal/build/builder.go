@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/anaremore/clank/apps/agent/internal/docker"
 )
@@ -29,76 +32,99 @@ type BuildResult struct {
 // ProgressFunc is a callback for reporting build progress.
 type ProgressFunc func(status, message string)
 
-// BuildFromSource clones a repo, auto-generates a Dockerfile if needed,
-// builds the Docker image, and returns the result.
-// onLog streams individual build log lines (may be nil).
-func (b *Builder) BuildFromSource(
-	ctx context.Context,
-	repoURL, branch, gitToken, dockerfilePath, serviceSlug, deploymentID string,
-	port int,
-	onProgress ProgressFunc,
-	onLog func(string),
-) (*BuildResult, error) {
-	// Step 1: Clone
-	cloneMsg := fmt.Sprintf("Cloning %s (branch: %s)...", repoURL, branch)
-	onProgress("cloning", cloneMsg)
-	if onLog != nil {
-		onLog(cloneMsg)
-	}
-	cloneDir, gitSHA, err := CloneRepo(ctx, repoURL, branch, gitToken)
-	if err != nil {
+// BuildOpts contains options for BuildFromSource.
+type BuildOpts struct {
+	RepoURL             string
+	Branch              string
+	GitToken            string
+	DockerfilePath      string
+	ServiceSlug         string
+	DeploymentID        string
+	Port                int
+	BuildTimeoutSeconds int
+	GeneratedDockerfile string // Platform-generated Dockerfile content (empty = use repo's own)
+	OnProgress          ProgressFunc
+	OnLog               func(string)
+}
+
+// BuildFromSource clones a repo, writes the platform-generated Dockerfile
+// (or uses the repo's own), builds the Docker image, and returns the result.
+func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildResult, error) {
+	onLog := opts.OnLog
+	logLine := func(msg string) {
 		if onLog != nil {
-			onLog(fmt.Sprintf("Clone failed: %v", err))
+			onLog(msg)
 		}
+	}
+
+	// Apply build timeout
+	timeout := time.Duration(opts.BuildTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 600 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Step 1: Clone
+	cloneMsg := fmt.Sprintf("Cloning %s (branch: %s)...", opts.RepoURL, opts.Branch)
+	opts.OnProgress("cloning", cloneMsg)
+	logLine(cloneMsg)
+
+	cloneDir, gitSHA, err := CloneRepo(ctx, opts.RepoURL, opts.Branch, opts.GitToken)
+	if err != nil {
+		logLine(fmt.Sprintf("Clone failed: %v", err))
 		return nil, fmt.Errorf("clone failed: %w", err)
 	}
 	defer CleanupCloneDir(cloneDir)
 
 	buildMsg := fmt.Sprintf("Cloned at %s, starting build...", gitSHA[:8])
-	onProgress("building", buildMsg)
-	if onLog != nil {
-		onLog(buildMsg)
-	}
+	opts.OnProgress("building", buildMsg)
+	logLine(buildMsg)
 
-	// Step 2: Auto-generate Dockerfile if missing
+	// Step 2: Write Dockerfile
+	dockerfilePath := opts.DockerfilePath
 	if dockerfilePath == "" {
 		dockerfilePath = "Dockerfile"
 	}
-	result := GenerateDockerfileIfMissing(cloneDir, dockerfilePath, port)
-	if result.Generated {
-		genMsg := fmt.Sprintf("Auto-generated Dockerfile (port=%d, health=%s)", result.EffectivePort, result.HealthPath)
-		log.Print(genMsg)
-		if onLog != nil {
-			onLog(genMsg)
+	fullPath := filepath.Join(cloneDir, dockerfilePath)
+
+	if _, err := os.Stat(fullPath); err == nil {
+		// Repo has its own Dockerfile — use it (always takes priority)
+		logLine("Using Dockerfile from repository")
+	} else if opts.GeneratedDockerfile != "" {
+		// Platform sent a generated Dockerfile via proto
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			return nil, fmt.Errorf("creating Dockerfile directory: %w", err)
 		}
+		if err := os.WriteFile(fullPath, []byte(opts.GeneratedDockerfile), 0o644); err != nil {
+			return nil, fmt.Errorf("writing generated Dockerfile: %w", err)
+		}
+		logLine("Using platform-generated Dockerfile")
+	} else {
+		logLine("No Dockerfile found. Add a Dockerfile to your repo or re-inspect your service.")
+		return nil, fmt.Errorf("no Dockerfile found in repository and no platform-generated Dockerfile provided")
 	}
 
 	// Step 3: Build image
-	imageTag := fmt.Sprintf("clank-%s:%s", serviceSlug, deploymentID[:12])
-	if onLog != nil {
-		onLog(fmt.Sprintf("Building image %s...", imageTag))
-	}
+	imageTag := fmt.Sprintf("clank-%s:%s", opts.ServiceSlug, opts.DeploymentID[:12])
+	logLine(fmt.Sprintf("Building image %s...", imageTag))
+
 	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, func(msg string) {
 		log.Printf("  [build] %s", msg)
-		if onLog != nil {
-			onLog(msg)
-		}
+		logLine(msg)
 	})
 	if err != nil {
-		if onLog != nil {
-			onLog(fmt.Sprintf("Build failed: %v", err))
+		logLine(fmt.Sprintf("Build failed: %v", err))
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("build timed out after %v", timeout)
 		}
 		return nil, fmt.Errorf("docker build failed: %w", err)
 	}
 
-	if onLog != nil {
-		onLog("Build complete")
-	}
+	logLine("Build complete")
 
 	return &BuildResult{
-		ImageTag:      imageTag,
-		GitSHA:        gitSHA,
-		EffectivePort: result.EffectivePort,
-		HealthPath:    result.HealthPath,
+		ImageTag: imageTag,
+		GitSHA:   gitSHA,
 	}, nil
 }

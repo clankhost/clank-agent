@@ -177,6 +177,9 @@ func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile s
 		Tags:       []string{tag},
 		Dockerfile: dockerfile,
 		Remove:     true,
+		// Limit build resources to prevent runaway builds from exhausting host
+		Memory:   2 * 1024 * 1024 * 1024, // 2 GB
+		CPUQuota: 200000,                  // 2 cores (100000 per core)
 	})
 	if err != nil {
 		return fmt.Errorf("building image: %w", err)

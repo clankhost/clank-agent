@@ -264,20 +264,21 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	if cmd.GetRepoUrl() != "" {
 		sendProgress("cloning", fmt.Sprintf("Cloning %s...", cmd.GetRepoUrl()), "", "", "", "")
 
-		result, err := h.builder.BuildFromSource(
-			ctx,
-			cmd.GetRepoUrl(),
-			cmd.GetBranch(),
-			cmd.GetGitToken(),
-			cmd.GetDockerfilePath(),
-			cmd.GetServiceSlug(),
-			deployID,
-			int(cmd.GetPort()),
-			func(status, message string) {
+		result, err := h.builder.BuildFromSource(ctx, build.BuildOpts{
+			RepoURL:             cmd.GetRepoUrl(),
+			Branch:              cmd.GetBranch(),
+			GitToken:            cmd.GetGitToken(),
+			DockerfilePath:      cmd.GetDockerfilePath(),
+			ServiceSlug:         cmd.GetServiceSlug(),
+			DeploymentID:        deployID,
+			Port:                int(cmd.GetPort()),
+			BuildTimeoutSeconds: int(cmd.GetBuildTimeoutSeconds()),
+			GeneratedDockerfile: cmd.GetGeneratedDockerfile(),
+			OnProgress: func(status, message string) {
 				sendProgress(status, message, "", "", "", "")
 			},
-			buildLog,
-		)
+			OnLog: buildLog,
+		})
 		if err != nil {
 			sendProgress("build_failed", fmt.Sprintf("Build failed: %v", err), "", "", "", "")
 			return

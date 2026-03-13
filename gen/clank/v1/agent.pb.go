@@ -1614,9 +1614,15 @@ type DeployCommand struct {
 	CompanionSlugs []string `protobuf:"bytes,19,rep,name=companion_slugs,json=companionSlugs,proto3" json:"companion_slugs,omitempty"`
 	// Base64-encoded Docker registry auth JSON for pulling private images (ADR-006).
 	// Format: base64({"username":"...","password":"..."})
-	RegistryAuth  string `protobuf:"bytes,20,opt,name=registry_auth,json=registryAuth,proto3" json:"registry_auth,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	RegistryAuth string `protobuf:"bytes,20,opt,name=registry_auth,json=registryAuth,proto3" json:"registry_auth,omitempty"`
+	// Maximum build time in seconds (0 = use agent default of 600s).
+	BuildTimeoutSeconds int32 `protobuf:"varint,21,opt,name=build_timeout_seconds,json=buildTimeoutSeconds,proto3" json:"build_timeout_seconds,omitempty"`
+	// Platform-generated Dockerfile content. If non-empty, the agent writes this
+	// to the clone directory instead of running local auto-detection.
+	// User-provided Dockerfiles in the repo always take priority.
+	GeneratedDockerfile string `protobuf:"bytes,22,opt,name=generated_dockerfile,json=generatedDockerfile,proto3" json:"generated_dockerfile,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *DeployCommand) Reset() {
@@ -1785,6 +1791,20 @@ func (x *DeployCommand) GetCompanionSlugs() []string {
 func (x *DeployCommand) GetRegistryAuth() string {
 	if x != nil {
 		return x.RegistryAuth
+	}
+	return ""
+}
+
+func (x *DeployCommand) GetBuildTimeoutSeconds() int32 {
+	if x != nil {
+		return x.BuildTimeoutSeconds
+	}
+	return 0
+}
+
+func (x *DeployCommand) GetGeneratedDockerfile() string {
+	if x != nil {
+		return x.GeneratedDockerfile
 	}
 	return ""
 }
@@ -3171,7 +3191,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\tsignature\x18\x05 \x01(\tR\tsignature\"N\n" +
 	"\fTunnelConfig\x12!\n" +
 	"\ftunnel_token\x18\x01 \x01(\tR\vtunnelToken\x12\x1b\n" +
-	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\x97\a\n" +
+	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xfe\a\n" +
 	"\rDeployCommand\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12!\n" +
 	"\fservice_slug\x18\x02 \x01(\tR\vserviceSlug\x12\x1b\n" +
@@ -3193,7 +3213,9 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rvolume_mounts\x18\x11 \x03(\v2\x15.clank.v1.VolumeMountR\fvolumeMounts\x12+\n" +
 	"\x11container_command\x18\x12 \x03(\tR\x10containerCommand\x12'\n" +
 	"\x0fcompanion_slugs\x18\x13 \x03(\tR\x0ecompanionSlugs\x12#\n" +
-	"\rregistry_auth\x18\x14 \x01(\tR\fregistryAuth\x1a:\n" +
+	"\rregistry_auth\x18\x14 \x01(\tR\fregistryAuth\x122\n" +
+	"\x15build_timeout_seconds\x18\x15 \x01(\x05R\x13buildTimeoutSeconds\x121\n" +
+	"\x14generated_dockerfile\x18\x16 \x01(\tR\x13generatedDockerfile\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
