@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"time"
 
@@ -119,14 +120,17 @@ func (a *Agent) Run(ctx context.Context) error {
 			log.Printf("Connection lost: %v", err)
 		}
 
-		log.Printf("Reconnecting in %s...", wait)
+		// Full jitter: random(0, min(cap, base * 2^attempt))
+		// Prevents thundering herd when control plane recovers
+		jittered := time.Duration(rand.Int63n(int64(wait)))
+		log.Printf("Reconnecting in %s...", jittered)
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(wait):
+		case <-time.After(jittered):
 		}
 
-		// Exponential backoff
+		// Exponential backoff on the cap
 		wait = wait * 2
 		if wait > reconnectMaxWait {
 			wait = reconnectMaxWait
@@ -211,11 +215,12 @@ func (a *Agent) runLogStreamer(ctx context.Context, conn *grpc.ClientConn) {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("[logs] Stream disconnected: %v, reconnecting in %s...", err, streamReconnectWait)
+		jitter := streamReconnectWait + time.Duration(rand.Int63n(int64(3*time.Second)))
+		log.Printf("[logs] Stream disconnected: %v, reconnecting in %s...", err, jitter)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(streamReconnectWait):
+		case <-time.After(jitter):
 		}
 	}
 }
@@ -228,11 +233,12 @@ func (a *Agent) runMetricStreamer(ctx context.Context, conn *grpc.ClientConn) {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("[metrics] Stream disconnected: %v, reconnecting in %s...", err, streamReconnectWait)
+		jitter := streamReconnectWait + time.Duration(rand.Int63n(int64(3*time.Second)))
+		log.Printf("[metrics] Stream disconnected: %v, reconnecting in %s...", err, jitter)
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(streamReconnectWait):
+		case <-time.After(jitter):
 		}
 	}
 }

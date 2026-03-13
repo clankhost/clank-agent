@@ -49,6 +49,10 @@ type CommandHandler struct {
 	// skipped to prevent stale cleanup commands from killing containers.
 	activeDeploysMu sync.Mutex
 	activeDeploys   map[string]time.Time // value = expiry time
+
+	// buildSem limits concurrent Docker builds to prevent OOM on
+	// resource-constrained servers. Default capacity: 2.
+	buildSem chan struct{}
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
@@ -62,6 +66,11 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 		&endpoint.BYOProxyProvider{},
 	)
 
+	maxBuilds := cfg.MaxConcurrentBuilds
+	if maxBuilds <= 0 {
+		maxBuilds = 2
+	}
+
 	return &CommandHandler{
 		docker:         dm,
 		builder:        b,
@@ -71,6 +80,7 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 		cfgDir:         cfgDir,
 		currentVersion: version,
 		logCollector:   lc,
+		buildSem:       make(chan struct{}, maxBuilds),
 	}
 }
 
@@ -156,6 +166,14 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	deployID := cmd.GetDeploymentId()
 	slug := cmd.GetServiceSlug()
 	log.Printf("Handling deploy command for deployment %s (service: %s)", deployID, slug)
+
+	// Acquire build slot (blocks if at capacity)
+	select {
+	case h.buildSem <- struct{}{}:
+		defer func() { <-h.buildSem }()
+	case <-ctx.Done():
+		return
+	}
 
 	// Guard: mark this slug as deploying so concurrent REMOVE commands
 	// don't kill the container while it's still starting up.

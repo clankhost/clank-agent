@@ -23,6 +23,9 @@ type Config struct {
 	RegistryURL      string `yaml:"registry_url,omitempty"`
 	RegistryUsername string `yaml:"registry_username,omitempty"`
 	RegistryPassword string `yaml:"registry_password,omitempty"`
+
+	// Resource limits (optional, defaults applied in code).
+	MaxConcurrentBuilds int `yaml:"max_concurrent_builds,omitempty"`
 }
 
 // DefaultConfigDir returns the platform-appropriate config directory.
