@@ -963,6 +963,22 @@ func generateLegacyLabels(labels map[string]string, serviceSlug string, domains 
 	labels[fmt.Sprintf("traefik.http.routers.%s.rule", routerName)] = hostRules
 	labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", routerName)] = "web"
 
+	// HTTPS → HTTP redirect for legacy/sslip.io domains.
+	// If Traefik is also serving port 443 (for endpoints with TLS), browsers
+	// may auto-upgrade these HTTP-only hostnames to HTTPS and get a 404.
+	// This low-priority HTTPS router catches those requests and redirects
+	// them back to HTTP. Endpoint-specific HTTPS routers (Let's Encrypt,
+	// Tailscale) have higher priority and take precedence.
+	httpsRouter := routerName + "-https-redir"
+	mwName := routerName + "-to-http"
+	labels[fmt.Sprintf("traefik.http.routers.%s.rule", httpsRouter)] = hostRules
+	labels[fmt.Sprintf("traefik.http.routers.%s.entrypoints", httpsRouter)] = "websecure"
+	labels[fmt.Sprintf("traefik.http.routers.%s.tls", httpsRouter)] = "true"
+	labels[fmt.Sprintf("traefik.http.routers.%s.middlewares", httpsRouter)] = mwName
+	labels[fmt.Sprintf("traefik.http.routers.%s.priority", httpsRouter)] = "1"
+	labels[fmt.Sprintf("traefik.http.middlewares.%s.redirectscheme.scheme", mwName)] = "http"
+	labels[fmt.Sprintf("traefik.http.middlewares.%s.redirectscheme.permanent", mwName)] = "false"
+
 	return labels
 }
 
@@ -1198,7 +1214,7 @@ func buildWordPressConfig(resolvedURL, pathPrefix string) string {
 	if pathPrefix != "" {
 		// Split URL into host-part and path-part for the PHP variables.
 		hostURL := strings.TrimSuffix(resolvedURL, pathPrefix)
-		return fmt.Sprintf(
+		config := fmt.Sprintf(
 			"$clank_prefix = '%s';\n"+
 				"$clank_host = '%s';\n"+
 				"define('WP_HOME', $clank_host . $clank_prefix);\n"+
@@ -1214,13 +1230,24 @@ func buildWordPressConfig(resolvedURL, pathPrefix string) string {
 				"}",
 			pathPrefix, hostURL,
 		)
+		if strings.HasPrefix(resolvedURL, "https://") {
+			config += "\n$_SERVER['HTTPS'] = 'on';"
+		}
+		return config
 	}
 
 	// No path prefix — just set canonical URL.
-	return fmt.Sprintf(
+	config := fmt.Sprintf(
 		"define('WP_HOME', '%s');\ndefine('WP_SITEURL', '%s');",
 		resolvedURL, resolvedURL,
 	)
+	// When behind a TLS-terminating proxy, tell WordPress the connection is
+	// secure. WordPress checks X-Forwarded-Proto by default but this is a
+	// belt-and-suspenders measure for proxy configs that don't forward it.
+	if strings.HasPrefix(resolvedURL, "https://") {
+		config += "\n$_SERVER['HTTPS'] = 'on';"
+	}
+	return config
 }
 
 // resolveTailscaleHostname discovers the machine's tailnet DNS name.

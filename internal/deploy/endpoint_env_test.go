@@ -100,7 +100,7 @@ func TestBuildWordPressConfig_PathPrefix(t *testing.T) {
 	if config == "" {
 		t.Fatal("expected non-empty config")
 	}
-	// Should contain WP_HOME, WP_SITEURL, and $_SERVER fixups
+	// Should contain WP_HOME, WP_SITEURL, $_SERVER fixups, and HTTPS flag
 	for _, substr := range []string{
 		"define('WP_HOME'",
 		"define('WP_SITEURL'",
@@ -108,6 +108,7 @@ func TestBuildWordPressConfig_PathPrefix(t *testing.T) {
 		"$_SERVER['SCRIPT_NAME']",
 		"$_SERVER['PHP_SELF']",
 		"$clank_prefix = '/wordpress'",
+		"$_SERVER['HTTPS'] = 'on'",
 	} {
 		if !contains(config, substr) {
 			t.Errorf("config missing %q", substr)
@@ -123,8 +124,23 @@ func TestBuildWordPressConfig_NoPathPrefix(t *testing.T) {
 	if !contains(config, "define('WP_HOME', 'https://myapp.example.com')") {
 		t.Error("missing WP_HOME define")
 	}
-	if contains(config, "$_SERVER") {
-		t.Error("should not contain $_SERVER fixups without path prefix")
+	// HTTPS URL should include $_SERVER['HTTPS'] = 'on' for TLS-terminating proxies
+	if !contains(config, "$_SERVER['HTTPS'] = 'on'") {
+		t.Error("HTTPS URL should set $_SERVER['HTTPS']")
+	}
+}
+
+func TestBuildWordPressConfig_HTTPNoServerHTTPS(t *testing.T) {
+	config := buildWordPressConfig("http://wordpress.192.168.1.5.sslip.io", "")
+	if config == "" {
+		t.Fatal("expected non-empty config")
+	}
+	if !contains(config, "define('WP_HOME', 'http://wordpress.192.168.1.5.sslip.io')") {
+		t.Error("missing WP_HOME define")
+	}
+	// HTTP URL should NOT set $_SERVER['HTTPS']
+	if contains(config, "$_SERVER['HTTPS']") {
+		t.Error("HTTP URL should not set $_SERVER['HTTPS']")
 	}
 }
 
