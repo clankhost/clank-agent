@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
 	"github.com/anaremore/clank/apps/agent/internal/backup"
@@ -84,6 +85,16 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 	}
 }
 
+// sanitizeUTF8 replaces invalid UTF-8 sequences with the Unicode replacement
+// character. Proto3 string fields must be valid UTF-8; sending invalid bytes
+// causes a marshaling error that kills the gRPC stream.
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
 // queuePendingResult stores a message for retry on the next connection.
 func (h *CommandHandler) queuePendingResult(msg *clankv1.AgentMessage) {
 	h.pendingMu.Lock()
@@ -110,6 +121,10 @@ func (h *CommandHandler) DrainPendingResults(stream grpcclient.ConnectStream) {
 	log.Printf("Draining %d pending deploy result(s) on new connection", len(results))
 	for _, msg := range results {
 		if err := stream.Send(msg); err != nil {
+			if strings.Contains(err.Error(), "invalid UTF-8") {
+				log.Printf("Dropping poison message with invalid UTF-8 (would never succeed): %v", err)
+				continue
+			}
 			log.Printf("Failed to send pending result on new stream: %v (re-queuing)", err)
 			h.queuePendingResult(msg)
 		} else {
@@ -194,7 +209,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 				DeployProgress: &clankv1.DeployProgress{
 					DeploymentId:  deployID,
 					Status:        status,
-					Message:       message,
+					Message:       sanitizeUTF8(message),
 					ContainerId:   containerID,
 					ContainerName: containerName,
 					ImageTag:      imageTag,
@@ -217,7 +232,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		dp := &clankv1.DeployProgress{
 			DeploymentId:  deployID,
 			Status:        status,
-			Message:       message,
+			Message:       sanitizeUTF8(message),
 			ContainerId:   containerID,
 			ContainerName: containerName,
 			ImageTag:      imageTag,
@@ -227,8 +242,8 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		if result != nil {
 			// Attach startup logs (Phase A)
 			if result.StartupLogs != "" {
-				// Truncate to 4KB for the proto message
-				logs := result.StartupLogs
+				// Sanitize + truncate to 4KB for the proto message
+				logs := sanitizeUTF8(result.StartupLogs)
 				if len(logs) > 4096 {
 					logs = logs[:4096]
 				}
@@ -542,7 +557,7 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 			CommandResult: &clankv1.CommandResult{
 				CommandId: commandID,
 				Success:   success,
-				Output:    output,
+				Output:    sanitizeUTF8(output),
 			},
 		},
 	}
@@ -709,7 +724,7 @@ func (h *CommandHandler) sendUpdateResult(stream grpcclient.ConnectStream, toVer
 		Success:     success,
 	}
 	if err != nil {
-		result.ErrorMessage = err.Error()
+		result.ErrorMessage = sanitizeUTF8(err.Error())
 		result.FailedPhase = selfupdate.ErrorPhase(err)
 	}
 
@@ -782,7 +797,7 @@ func (h *CommandHandler) HandleEndpoint(ctx context.Context, stream grpcclient.C
 				CommandId:   cmd.GetCommandId(),
 				EndpointId:  cmd.GetEndpointId(),
 				Status:      result.Status,
-				Message:     result.Message,
+				Message:     sanitizeUTF8(result.Message),
 				ResolvedUrl: result.ResolvedURL,
 				VerifiedBy:  result.VerifiedBy,
 				Diagnostics: diagnostics,
@@ -821,6 +836,11 @@ func (h *CommandHandler) HandleBackup(ctx context.Context, stream grpcclient.Con
 	executor := backup.NewExecutor(h.docker)
 	result := executor.Execute(ctx, cmd)
 
+	// Sanitize error message for proto marshaling safety
+	if result.ErrorMessage != "" {
+		result.ErrorMessage = sanitizeUTF8(result.ErrorMessage)
+	}
+
 	if result.Success {
 		log.Printf("Backup %s completed: %d bytes, %d files",
 			cmd.GetBackupId(), result.SizeBytes, len(result.Files))
@@ -850,7 +870,7 @@ func (h *CommandHandler) HandlePushImage(ctx context.Context, stream grpcclient.
 				PushImageResult: &clankv1.PushImageResult{
 					DeploymentId: cmd.DeploymentId,
 					Success:      success,
-					ErrorMessage: errMsg,
+					ErrorMessage: sanitizeUTF8(errMsg),
 					ImageDigest:  digest,
 				},
 			},

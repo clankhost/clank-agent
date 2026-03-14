@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/docker/docker/api/types/container"
 )
@@ -159,7 +160,13 @@ func (m *Manager) GetStartupLogs(ctx context.Context, containerID string, lines 
 		cleaned = cleaned[:maxStartupLogBytes]
 	}
 
-	return strings.TrimSpace(string(cleaned)), nil
+	result := strings.TrimSpace(string(cleaned))
+	// Proto3 string fields must be valid UTF-8. Container logs can contain
+	// arbitrary binary data, so replace invalid sequences with U+FFFD.
+	if !utf8.ValidString(result) {
+		result = strings.ToValidUTF8(result, "\uFFFD")
+	}
+	return result, nil
 }
 
 // stripDockerStreamHeaders removes the 8-byte header prefix from each frame
