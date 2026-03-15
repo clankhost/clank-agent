@@ -164,10 +164,15 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 // isExpectedDisconnect returns true for errors caused by Cloudflare Tunnel
-// cycling connections (HTTP 524 "A Timeout Occurred"). These are normal
-// for tunneled connections and don't indicate a real problem.
+// cycling connections. CF terminates long-lived gRPC streams in two ways:
+//   - HTTP 524 "A Timeout Occurred" (CF's connection timeout)
+//   - RST_STREAM with INTERNAL_ERROR (HTTP/2 stream reset)
+//
+// Both are normal for tunneled connections and don't indicate a real problem.
 func isExpectedDisconnect(err error) bool {
-	return strings.Contains(err.Error(), "524")
+	msg := err.Error()
+	return strings.Contains(msg, "524") ||
+		strings.Contains(msg, "RST_STREAM")
 }
 
 // connectAndStream establishes the bidi stream and runs the heartbeat loop.
