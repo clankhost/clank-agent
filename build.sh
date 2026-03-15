@@ -6,7 +6,7 @@
 #   GOOS=linux GOARCH=arm64 bash apps/agent/build.sh   # linux/arm64
 #
 # Version is read from install-files/VERSION (single source of truth).
-# The ldflags target is github.com/anaremore/clank/apps/agent/cmd.Version
+# The ldflags target is github.com/clankhost/clank-agent/cmd.Version
 # (NOT main.version — the variable lives in the cmd package).
 #
 # IMPORTANT: Always use this script instead of raw `go build`.
@@ -20,9 +20,9 @@ COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "none")
 DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 LDFLAGS="-s -w \
-  -X github.com/anaremore/clank/apps/agent/cmd.Version=${VERSION} \
-  -X github.com/anaremore/clank/apps/agent/cmd.Commit=${COMMIT} \
-  -X github.com/anaremore/clank/apps/agent/cmd.Date=${DATE}"
+  -X github.com/clankhost/clank-agent/cmd.Version=${VERSION} \
+  -X github.com/clankhost/clank-agent/cmd.Commit=${COMMIT} \
+  -X github.com/clankhost/clank-agent/cmd.Date=${DATE}"
 
 TARGET_OS=${GOOS:-linux}
 TARGET_ARCH=${GOARCH:-amd64}

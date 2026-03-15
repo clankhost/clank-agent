@@ -10,16 +10,16 @@ import (
 	"time"
 	"unicode/utf8"
 
-	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
-	"github.com/anaremore/clank/apps/agent/internal/backup"
-	"github.com/anaremore/clank/apps/agent/internal/build"
-	"github.com/anaremore/clank/apps/agent/internal/deploy"
-	"github.com/anaremore/clank/apps/agent/internal/docker"
-	"github.com/anaremore/clank/apps/agent/internal/endpoint"
-	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
-	"github.com/anaremore/clank/apps/agent/internal/logs"
-	"github.com/anaremore/clank/apps/agent/internal/selfupdate"
-	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
+	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
+	"github.com/clankhost/clank-agent/internal/backup"
+	"github.com/clankhost/clank-agent/internal/build"
+	"github.com/clankhost/clank-agent/internal/deploy"
+	"github.com/clankhost/clank-agent/internal/docker"
+	"github.com/clankhost/clank-agent/internal/endpoint"
+	"github.com/clankhost/clank-agent/internal/grpcclient"
+	"github.com/clankhost/clank-agent/internal/logs"
+	"github.com/clankhost/clank-agent/internal/selfupdate"
+	"github.com/clankhost/clank-agent/internal/sysinfo"
 )
 
 // Terminal deploy statuses — if Send fails for these, queue for retry.

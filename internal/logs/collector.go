@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
+	"github.com/clankhost/clank-agent/internal/docker"
 )
 
 const (

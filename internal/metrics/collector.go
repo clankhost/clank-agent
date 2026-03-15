@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"time"
 
-	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
+	"github.com/clankhost/clank-agent/internal/docker"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/load"

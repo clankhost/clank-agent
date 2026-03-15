@@ -1,0 +1,8 @@
+# Build artifacts
+clank-agent
+clank-agent-*
+agent.exe
+*.exe
+
+# Local config
+config.yaml

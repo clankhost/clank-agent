@@ -14,9 +14,9 @@ builds:
       - arm64
     ldflags:
       - -s -w
-      - -X github.com/anaremore/clank/apps/agent/cmd.Version={{.Version}}
-      - -X github.com/anaremore/clank/apps/agent/cmd.Commit={{.ShortCommit}}
-      - -X github.com/anaremore/clank/apps/agent/cmd.Date={{.Date}}
+      - -X github.com/clankhost/clank-agent/cmd.Version={{.Version}}
+      - -X github.com/clankhost/clank-agent/cmd.Commit={{.ShortCommit}}
+      - -X github.com/clankhost/clank-agent/cmd.Date={{.Date}}
 
 archives:
   - format: tar.gz

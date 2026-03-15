@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/clankhost/clank-agent/internal/docker"
 	"github.com/shirou/gopsutil/v4/disk"
 )
 

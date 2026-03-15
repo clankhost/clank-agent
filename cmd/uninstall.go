@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/anaremore/clank/apps/agent/internal/agent"
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/clankhost/clank-agent/internal/agent"
+	"github.com/clankhost/clank-agent/internal/docker"
 	"github.com/spf13/cobra"
 )
 

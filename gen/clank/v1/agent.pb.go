@@ -3360,7 +3360,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\aConnect\x12\x16.clank.v1.AgentMessage\x1a\x18.clank.v1.ControlMessage(\x010\x01\x124\n" +
 	"\n" +
 	"StreamLogs\x12\x12.clank.v1.LogEntry\x1a\x10.clank.v1.LogAck(\x01\x12=\n" +
-	"\rStreamMetrics\x12\x15.clank.v1.MetricBatch\x1a\x13.clank.v1.MetricAck(\x01B<Z:github.com/anaremore/clank/apps/agent/gen/clank/v1;clankv1b\x06proto3"
+	"\rStreamMetrics\x12\x15.clank.v1.MetricBatch\x1a\x13.clank.v1.MetricAck(\x01B<Z:github.com/clankhost/clank-agent/gen/clank/v1;clankv1b\x06proto3"
 
 var (
 	file_clank_v1_agent_proto_rawDescOnce sync.Once

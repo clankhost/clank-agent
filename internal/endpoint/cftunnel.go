@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/clankhost/clank-agent/internal/docker"
 )
 
 // CFTunnelProvider handles public_tunnel_cloudflare endpoints.

@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/anaremore/clank/apps/agent/internal/agent"
-	"github.com/anaremore/clank/apps/agent/internal/certs"
-	"github.com/anaremore/clank/apps/agent/internal/grpcclient"
-	"github.com/anaremore/clank/apps/agent/internal/sysinfo"
+	"github.com/clankhost/clank-agent/internal/agent"
+	"github.com/clankhost/clank-agent/internal/certs"
+	"github.com/clankhost/clank-agent/internal/grpcclient"
+	"github.com/clankhost/clank-agent/internal/sysinfo"
 	"github.com/spf13/cobra"
 	"google.golang.org/grpc/grpclog"
 )

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/anaremore/clank/apps/agent/internal/agent"
-	"github.com/anaremore/clank/apps/agent/internal/doctor"
+	"github.com/clankhost/clank-agent/internal/agent"
+	"github.com/clankhost/clank-agent/internal/doctor"
 	"github.com/spf13/cobra"
 )
 

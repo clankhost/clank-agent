@@ -1,4 +1,4 @@
-module github.com/anaremore/clank/apps/agent
+module github.com/clankhost/clank-agent
 
 go 1.25.0
 

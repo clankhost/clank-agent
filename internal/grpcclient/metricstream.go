@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"log"
 
-	clankv1 "github.com/anaremore/clank/apps/agent/gen/clank/v1"
+	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
 	"google.golang.org/grpc"
 )
 

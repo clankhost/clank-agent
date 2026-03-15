@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/clankhost/clank-agent/internal/docker"
 )
 
 // ── generateLegacyLabels ────────────────────────────────────────────────

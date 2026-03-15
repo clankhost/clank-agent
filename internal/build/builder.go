@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/anaremore/clank/apps/agent/internal/docker"
+	"github.com/clankhost/clank-agent/internal/docker"
 )
 
 // Builder orchestrates the clone → auto-Dockerfile → Docker build pipeline.

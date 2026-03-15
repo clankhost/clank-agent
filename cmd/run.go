@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	agentpkg "github.com/anaremore/clank/apps/agent/internal/agent"
+	agentpkg "github.com/clankhost/clank-agent/internal/agent"
 	"github.com/spf13/cobra"
 )
 
