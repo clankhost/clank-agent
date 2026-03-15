@@ -902,7 +902,12 @@ func (d *Deployer) runHTTPHealthChecks(
 // one that returns 200-399, or empty string if none work.
 func autoDetectHealthPath(ip string, port int) string {
 	paths := []string{"/health", "/healthz", "/"}
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	for _, path := range paths {
 		url := fmt.Sprintf("http://%s:%d%s", ip, port, path)
 		resp, err := client.Get(url)
@@ -918,7 +923,15 @@ func autoDetectHealthPath(ip string, port int) string {
 }
 
 func checkHTTPHealth(url string, timeoutSec int) bool {
-	client := &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
+	client := &http.Client{
+		Timeout: time.Duration(timeoutSec) * time.Second,
+		// Don't follow redirects — a 302 proves the server is running.
+		// Following redirects can fail when the target is HTTPS but the
+		// container only speaks HTTP (TLS handshake → 400 Bad Request).
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 	resp, err := client.Get(url)
 	if err != nil {
 		return false
