@@ -6,6 +6,7 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/anaremore/clank/apps/agent/internal/build"
@@ -109,37 +110,70 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.runNetworkPruner(ctx)
 
 	wait := reconnectBaseWait
+	quiet := false // first connection always logs
 
 	for {
-		err := a.connectAndStream(ctx)
+		connStart := time.Now()
+		err := a.connectAndStream(ctx, quiet)
 		if ctx.Err() != nil {
 			// Graceful shutdown
 			return nil
 		}
-		if err != nil {
-			log.Printf("Connection lost: %v", err)
+
+		connDuration := time.Since(connStart)
+		healthyConn := connDuration >= heartbeatInterval
+		expectedDisconnect := err != nil && isExpectedDisconnect(err)
+
+		// Silent reconnect: expected CF tunnel cycling after a healthy connection.
+		// All other cases get full logging and backoff.
+		silentReconnect := expectedDisconnect && healthyConn
+
+		// Reset backoff if the connection was healthy (lasted at least one
+		// heartbeat cycle). Only escalate for rapid failures.
+		if healthyConn {
+			wait = reconnectBaseWait
 		}
 
-		// Full jitter: random(0, min(cap, base * 2^attempt))
-		// Prevents thundering herd when control plane recovers
-		jittered := time.Duration(rand.Int63n(int64(wait)))
-		log.Printf("Reconnecting in %s...", jittered)
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(jittered):
+		if !silentReconnect {
+			// Log the error (real failure or rapid expected disconnect)
+			if err != nil {
+				log.Printf("Connection lost: %v", err)
+			}
+
+			// Apply jittered backoff
+			jittered := time.Duration(rand.Int63n(int64(wait)))
+			log.Printf("Reconnecting in %s...", jittered)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(jittered):
+			}
+
+			// Escalate backoff only for unhealthy connections
+			if !healthyConn {
+				wait = wait * 2
+				if wait > reconnectMaxWait {
+					wait = reconnectMaxWait
+				}
+			}
 		}
 
-		// Exponential backoff on the cap
-		wait = wait * 2
-		if wait > reconnectMaxWait {
-			wait = reconnectMaxWait
-		}
+		// Suppress connect logs on next iteration for silent reconnects
+		quiet = silentReconnect
 	}
 }
 
+// isExpectedDisconnect returns true for errors caused by Cloudflare Tunnel
+// cycling connections (HTTP 524 "A Timeout Occurred"). These are normal
+// for tunneled connections and don't indicate a real problem.
+func isExpectedDisconnect(err error) bool {
+	return strings.Contains(err.Error(), "524")
+}
+
 // connectAndStream establishes the bidi stream and runs the heartbeat loop.
-func (a *Agent) connectAndStream(ctx context.Context) error {
+// When quiet is true, suppresses connection/heartbeat logs (used for expected
+// Cloudflare Tunnel reconnects that shouldn't alarm users).
+func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	var conn *grpc.ClientConn
 	var err error
 
@@ -164,7 +198,9 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 		return fmt.Errorf("opening stream: %w", err)
 	}
 
-	log.Println("Connected to control plane")
+	if !quiet {
+		log.Println("Connected to control plane")
+	}
 
 	// Drain any deploy results queued from a previous broken connection.
 	// This ensures the API learns about deploys that completed while
@@ -177,7 +213,7 @@ func (a *Agent) connectAndStream(ctx context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- a.sendHeartbeats(streamCtx, stream)
+		errCh <- a.sendHeartbeats(streamCtx, stream, quiet)
 	}()
 
 	// Receive loop — listen for commands from control plane
@@ -243,7 +279,7 @@ func (a *Agent) runMetricStreamer(ctx context.Context, conn *grpc.ClientConn) {
 	}
 }
 
-func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStream) error {
+func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStream, quiet bool) error {
 	ticker := time.NewTicker(heartbeatInterval)
 	defer ticker.Stop()
 
@@ -252,7 +288,9 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 	if err := grpcclient.SendHeartbeat(stream, info, containers); err != nil {
 		return fmt.Errorf("sending heartbeat: %w", err)
 	}
-	log.Println("Sent initial heartbeat")
+	if !quiet {
+		log.Println("Sent initial heartbeat")
+	}
 
 	for {
 		select {
