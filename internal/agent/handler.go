@@ -652,6 +652,13 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 	newVersion := cmd.GetVersion()
 	log.Printf("Self-update: %s → %s", h.currentVersion, newVersion)
 
+	// Already running this version — nothing to do, don't exit.
+	if h.currentVersion == newVersion {
+		log.Printf("[update] Already running version %s, skipping", newVersion)
+		h.sendUpdateResult(stream, newVersion, true, nil)
+		return
+	}
+
 	// Write state file before attempting update (for crash recovery).
 	// Use the binary directory (always writable under systemd sandbox)
 	// instead of cfgDir which may be in a read-only home directory.
