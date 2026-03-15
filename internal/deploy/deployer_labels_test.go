@@ -309,6 +309,7 @@ func TestGenerateTraefikLabels_HealthCheckLabels(t *testing.T) {
 	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.path", "/health")
 	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.interval", "5s")
 	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.timeout", "3s")
+	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.healthcheck.followredirects", "false")
 }
 
 func TestGenerateTraefikLabels_NoHealthCheckLabelsWhenEmpty(t *testing.T) {

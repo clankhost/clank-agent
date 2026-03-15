@@ -969,6 +969,7 @@ func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, p
 		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.path", svcName)] = hcPath
 		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.interval", svcName)] = "5s"
 		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.timeout", svcName)] = "3s"
+		labels[fmt.Sprintf("traefik.http.services.%s.loadbalancer.healthcheck.followredirects", svcName)] = "false"
 	}
 
 	// Always generate sslip.io / localhost labels for basic accessibility
