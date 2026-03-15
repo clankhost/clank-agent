@@ -264,6 +264,13 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 				return fmt.Errorf("sending heartbeat: %w", err)
 			}
 			log.Println("Heartbeat sent")
+
+			// Drain any pending results from deploys that completed while
+			// the previous stream was down. This handles the race where a
+			// deploy finishes after DrainPendingResults already ran at
+			// connection start — without this, results sit in the queue
+			// until the next reconnect.
+			a.handler.DrainPendingResults(stream)
 		}
 	}
 }
