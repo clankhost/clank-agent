@@ -25,10 +25,6 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-extra_files:
-  - glob: ../../install/install.sh
-  - glob: ../../install/systemd/clank-agent.service
-
 changelog:
   sort: asc
   filters:
