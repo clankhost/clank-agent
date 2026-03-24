@@ -336,6 +336,34 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 	result.EffectivePort = effectivePort
 
+	// === Volume auto-detection from image VOLUME directives ===
+	// If the image declares VOLUME paths that aren't already covered by
+	// explicit volume config from the API, create deterministically-named
+	// volumes so data persists across redeploys.
+	if imageMeta != nil && len(imageMeta.Volumes) > 0 {
+		configuredPaths := make(map[string]bool, len(opts.Volumes))
+		for _, v := range opts.Volumes {
+			configuredPaths[v.MountPath] = true
+		}
+		for _, volPath := range imageMeta.Volumes {
+			if configuredPaths[volPath] {
+				continue
+			}
+			if !docker.IsValidMountPath(volPath) {
+				log.Printf("Skipping auto-detected volume at blocked path: %s", volPath)
+				continue
+			}
+			sanitized := strings.TrimPrefix(volPath, "/")
+			sanitized = strings.ReplaceAll(sanitized, "/", "-")
+			volName := fmt.Sprintf("clank-%s-vol-%s", opts.ServiceSlug, sanitized)
+			opts.Volumes = append(opts.Volumes, docker.VolumeMount{
+				Name:      volName,
+				MountPath: volPath,
+			})
+			log.Printf("Auto-detected volume: %s -> %s", volName, volPath)
+		}
+	}
+
 	// Generate Traefik labels using the effective port.
 	// isHTTP defaults to true (assume HTTP until probing proves otherwise).
 	isHTTP := true
