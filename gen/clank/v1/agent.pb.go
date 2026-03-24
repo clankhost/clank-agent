@@ -936,8 +936,10 @@ type ContainerIntrospection struct {
 	ImageCmd            []string               `protobuf:"bytes,7,rep,name=image_cmd,json=imageCmd,proto3" json:"image_cmd,omitempty"`
 	ImageEntrypoint     []string               `protobuf:"bytes,8,rep,name=image_entrypoint,json=imageEntrypoint,proto3" json:"image_entrypoint,omitempty"`
 	HasImageHealthcheck bool                   `protobuf:"varint,9,opt,name=has_image_healthcheck,json=hasImageHealthcheck,proto3" json:"has_image_healthcheck,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// VOLUME directive paths auto-detected from the image.
+	ImageVolumes  []string `protobuf:"bytes,10,rep,name=image_volumes,json=imageVolumes,proto3" json:"image_volumes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ContainerIntrospection) Reset() {
@@ -1031,6 +1033,13 @@ func (x *ContainerIntrospection) GetHasImageHealthcheck() bool {
 		return x.HasImageHealthcheck
 	}
 	return false
+}
+
+func (x *ContainerIntrospection) GetImageVolumes() []string {
+	if x != nil {
+		return x.ImageVolumes
+	}
+	return nil
 }
 
 // A port discovered via image EXPOSE or runtime probing.
@@ -3142,7 +3151,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rintrospection\x18\t \x01(\v2 .clank.v1.ContainerIntrospectionR\rintrospection\x12%\n" +
 	"\x0eeffective_port\x18\n" +
 	" \x01(\x05R\reffectivePort\x12!\n" +
-	"\fimage_digest\x18\v \x01(\tR\vimageDigest\"\x82\x03\n" +
+	"\fimage_digest\x18\v \x01(\tR\vimageDigest\"\xa7\x03\n" +
 	"\x16ContainerIntrospection\x12C\n" +
 	"\x10discovered_ports\x18\x01 \x03(\v2\x18.clank.v1.DiscoveredPortR\x0fdiscoveredPorts\x12!\n" +
 	"\fcontainer_ip\x18\x02 \x01(\tR\vcontainerIp\x12\x1a\n" +
@@ -3153,7 +3162,9 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x12image_expose_ports\x18\x06 \x03(\x05R\x10imageExposePorts\x12\x1b\n" +
 	"\timage_cmd\x18\a \x03(\tR\bimageCmd\x12)\n" +
 	"\x10image_entrypoint\x18\b \x03(\tR\x0fimageEntrypoint\x122\n" +
-	"\x15has_image_healthcheck\x18\t \x01(\bR\x13hasImageHealthcheck\"X\n" +
+	"\x15has_image_healthcheck\x18\t \x01(\bR\x13hasImageHealthcheck\x12#\n" +
+	"\rimage_volumes\x18\n" +
+	" \x03(\tR\fimageVolumes\"X\n" +
 	"\x0eDiscoveredPort\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\x05R\x04port\x12\x1a\n" +
 	"\bprotocol\x18\x02 \x01(\tR\bprotocol\x12\x16\n" +
@@ -3360,7 +3371,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\aConnect\x12\x16.clank.v1.AgentMessage\x1a\x18.clank.v1.ControlMessage(\x010\x01\x124\n" +
 	"\n" +
 	"StreamLogs\x12\x12.clank.v1.LogEntry\x1a\x10.clank.v1.LogAck(\x01\x12=\n" +
-	"\rStreamMetrics\x12\x15.clank.v1.MetricBatch\x1a\x13.clank.v1.MetricAck(\x01B<Z:github.com/clankhost/clank-agent/gen/clank/v1;clankv1b\x06proto3"
+	"\rStreamMetrics\x12\x15.clank.v1.MetricBatch\x1a\x13.clank.v1.MetricAck(\x01B7Z5github.com/clankhost/clank-agent/gen/clank/v1;clankv1b\x06proto3"
 
 var (
 	file_clank_v1_agent_proto_rawDescOnce sync.Once

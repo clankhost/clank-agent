@@ -485,6 +485,7 @@ func buildIntrospectionProto(result *deploy.DeployResult) *clankv1.ContainerIntr
 		intro.ImageCmd = result.ImageMeta.Cmd
 		intro.ImageEntrypoint = result.ImageMeta.Entrypoint
 		intro.HasImageHealthcheck = result.ImageMeta.Healthcheck != nil
+		intro.ImageVolumes = result.ImageMeta.Volumes
 	}
 
 	return intro

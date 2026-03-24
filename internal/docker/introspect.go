@@ -19,6 +19,7 @@ type ImageMeta struct {
 	Healthcheck  *HealthcheckMeta
 	Cmd          []string
 	Entrypoint   []string
+	Volumes      []string // VOLUME directive paths from the Dockerfile
 }
 
 // HealthcheckMeta describes a HEALTHCHECK instruction from a Dockerfile.
@@ -70,6 +71,14 @@ func (m *Manager) InspectImage(ctx context.Context, imageRef string) (*ImageMeta
 
 		meta.Cmd = inspect.Config.Cmd
 		meta.Entrypoint = inspect.Config.Entrypoint
+
+		// Extract VOLUME directives
+		if len(inspect.Config.Volumes) > 0 {
+			for path := range inspect.Config.Volumes {
+				meta.Volumes = append(meta.Volumes, path)
+			}
+			sort.Strings(meta.Volumes)
+		}
 
 		// Extract HEALTHCHECK
 		if inspect.Config.Healthcheck != nil && len(inspect.Config.Healthcheck.Test) > 0 {

@@ -255,7 +255,7 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 	// Build volume mounts
 	var mounts []mount.Mount
 	for _, vol := range opts.Volumes {
-		if !isValidMountPath(vol.MountPath) {
+		if !IsValidMountPath(vol.MountPath) {
 			return "", fmt.Errorf("invalid volume mount path: %s", vol.MountPath)
 		}
 		mounts = append(mounts, mount.Mount{
@@ -713,8 +713,8 @@ var blockedMountPaths = []string{
 	"/root", "/boot", "/lib", "/sbin", "/bin",
 }
 
-// isValidMountPath checks that a mount path is absolute and not in the blocked set.
-func isValidMountPath(path string) bool {
+// IsValidMountPath checks that a mount path is absolute and not in the blocked set.
+func IsValidMountPath(path string) bool {
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "..") {
 		return false
 	}
