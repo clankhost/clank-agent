@@ -1,5 +1,7 @@
 # Clank Agent
 
+[![CI](https://github.com/clankhost/clank-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/clankhost/clank-agent/actions/workflows/ci.yml)
+
 Lightweight agent for [Clank](https://clank.host), a self-hosted platform for deploying containerized applications. The agent runs on your servers and manages Docker containers, networking, builds, and deployments.
 
 ## Overview
