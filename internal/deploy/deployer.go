@@ -655,7 +655,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 			return result, err
 		}
 		// Health check passed — clean up old container if blue-green
-		if useBlueGreen && oldID != "" {
+		if useBlueGreen && oldID != "" && oldID != containerID {
 			// Brief delay for Traefik to fully route to new container
 			time.Sleep(2 * time.Second)
 			log.Printf("Blue-green success: stopping old container %s (%s)", oldName, oldID[:12])
@@ -663,6 +663,8 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 				log.Printf("Warning: failed to remove old container: %v", stopErr)
 			}
 			onProgress("deploying", "Traffic switched to new version", "", "")
+		} else if useBlueGreen && oldID == containerID {
+			log.Printf("Blue-green: adopted existing container %s — skipping cleanup", oldName)
 		}
 		return result, nil
 	}
