@@ -221,6 +221,18 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	slug := cmd.GetServiceSlug()
 	log.Printf("Handling deploy command for deployment %s (service: %s)", deployID, slug)
 
+	// Acquire build slot (blocks if at capacity).
+	// Dedup check is AFTER semaphore acquisition — if ctx is cancelled
+	// while waiting (e.g. CF Tunnel stream cycle), the goroutine exits
+	// without marking the deployment as "seen", allowing re-dispatch
+	// on reconnect.
+	select {
+	case h.buildSem <- struct{}{}:
+		defer func() { <-h.buildSem }()
+	case <-ctx.Done():
+		return
+	}
+
 	// Dedup: skip if we're already processing or recently processed this deployment.
 	if h.isDeploymentSeen(deployID) {
 		log.Printf("Skipping duplicate deploy command for deployment %s (already processing/completed)", deployID)
@@ -228,14 +240,6 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	}
 	h.markDeploymentSeen(deployID)
 	defer h.clearDeploymentSeen(deployID)
-
-	// Acquire build slot (blocks if at capacity)
-	select {
-	case h.buildSem <- struct{}{}:
-		defer func() { <-h.buildSem }()
-	case <-ctx.Done():
-		return
-	}
 
 	// Guard: mark this slug as deploying so concurrent REMOVE commands
 	// don't kill the container while it's still starting up.
