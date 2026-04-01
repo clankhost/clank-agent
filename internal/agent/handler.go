@@ -51,6 +51,13 @@ type CommandHandler struct {
 	activeDeploysMu sync.Mutex
 	activeDeploys   map[string]time.Time // value = expiry time
 
+	// deploymentsMu guards deploymentsSeen — deployment IDs that are
+	// currently being processed or were recently completed. Prevents
+	// duplicate deploy commands (e.g. from reconnect re-dispatch) from
+	// creating container name conflicts.
+	deploymentsMu   sync.Mutex
+	deploymentsSeen map[string]time.Time // deployment_id → expiry
+
 	// buildSem limits concurrent Docker builds to prevent OOM on
 	// resource-constrained servers. Default capacity: 2.
 	buildSem chan struct{}
@@ -176,11 +183,51 @@ func (h *CommandHandler) isDeployActive(slug string) bool {
 	return true
 }
 
+func (h *CommandHandler) markDeploymentSeen(deployID string) {
+	h.deploymentsMu.Lock()
+	defer h.deploymentsMu.Unlock()
+	if h.deploymentsSeen == nil {
+		h.deploymentsSeen = make(map[string]time.Time)
+	}
+	h.deploymentsSeen[deployID] = time.Now().Add(30 * time.Minute)
+}
+
+func (h *CommandHandler) isDeploymentSeen(deployID string) bool {
+	h.deploymentsMu.Lock()
+	defer h.deploymentsMu.Unlock()
+	expiry, ok := h.deploymentsSeen[deployID]
+	if !ok {
+		return false
+	}
+	if time.Now().After(expiry) {
+		delete(h.deploymentsSeen, deployID)
+		return false
+	}
+	return true
+}
+
+func (h *CommandHandler) clearDeploymentSeen(deployID string) {
+	// Keep for grace period to catch late duplicates.
+	h.deploymentsMu.Lock()
+	defer h.deploymentsMu.Unlock()
+	if h.deploymentsSeen != nil {
+		h.deploymentsSeen[deployID] = time.Now().Add(5 * time.Minute)
+	}
+}
+
 // HandleDeploy processes a DeployCommand — clone+build or image pull, then deploy.
 func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.DeployCommand) {
 	deployID := cmd.GetDeploymentId()
 	slug := cmd.GetServiceSlug()
 	log.Printf("Handling deploy command for deployment %s (service: %s)", deployID, slug)
+
+	// Dedup: skip if we're already processing or recently processed this deployment.
+	if h.isDeploymentSeen(deployID) {
+		log.Printf("Skipping duplicate deploy command for deployment %s (already processing/completed)", deployID)
+		return
+	}
+	h.markDeploymentSeen(deployID)
+	defer h.clearDeploymentSeen(deployID)
 
 	// Acquire build slot (blocks if at capacity)
 	select {

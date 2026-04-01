@@ -473,7 +473,19 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		Healthcheck:   injectedHealthcheck,
 	})
 	if err != nil {
-		return result, fmt.Errorf("starting container: %w", err)
+		// Container name conflict — adopt the existing container if it's from a prior attempt
+		// for the same deployment (duplicate dispatch from reconnect).
+		if strings.Contains(err.Error(), "is already in use") {
+			existingID, _, findErr := d.docker.FindContainerByName(ctx, containerName)
+			if findErr == nil && existingID != "" {
+				log.Printf("Container %s already exists (id: %s), adopting it", containerName, existingID[:12])
+				containerID = existingID
+				err = nil
+			}
+		}
+		if err != nil {
+			return result, fmt.Errorf("starting container: %w", err)
+		}
 	}
 
 	if opts.ProjectNetwork != "" {

@@ -380,6 +380,27 @@ func (m *Manager) FindContainerByLabel(ctx context.Context, key, value string) (
 	return c.ID, name, nil
 }
 
+// FindContainerByName finds a container by exact name (including stopped).
+// Returns the container ID and name, or empty strings if not found.
+func (m *Manager) FindContainerByName(ctx context.Context, name string) (string, string, error) {
+	containers, err := m.cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filters.NewArgs(filters.Arg("name", "^/"+name+"$")),
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("listing containers by name: %w", err)
+	}
+	if len(containers) == 0 {
+		return "", "", nil
+	}
+	c := containers[0]
+	cName := ""
+	if len(c.Names) > 0 {
+		cName = strings.TrimPrefix(c.Names[0], "/")
+	}
+	return c.ID, cName, nil
+}
+
 // ListManagedContainers lists all containers with the clank.managed=true label.
 func (m *Manager) ListManagedContainers(ctx context.Context) ([]ContainerInfo, error) {
 	containers, err := m.cli.ContainerList(ctx, container.ListOptions{
