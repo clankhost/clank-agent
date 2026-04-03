@@ -189,7 +189,7 @@ func (h *CommandHandler) markDeploymentSeen(deployID string) {
 	if h.deploymentsSeen == nil {
 		h.deploymentsSeen = make(map[string]time.Time)
 	}
-	h.deploymentsSeen[deployID] = time.Now().Add(30 * time.Minute)
+	h.deploymentsSeen[deployID] = time.Now().Add(2 * time.Minute)
 }
 
 func (h *CommandHandler) isDeploymentSeen(deployID string) bool {
