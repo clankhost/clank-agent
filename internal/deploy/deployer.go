@@ -377,6 +377,23 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	// Container name
 	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
 
+	// Fast path: if a container with this exact name already exists and is
+	// running, this is a retry for the same deployment (stream broke before
+	// progress was delivered). Skip all work and report success immediately.
+	if existingID, _, findErr := d.docker.FindContainerByName(ctx, containerName); findErr == nil && existingID != "" {
+		ci, inspErr := d.docker.InspectContainer(ctx, existingID)
+		if inspErr == nil && ci != nil && ci.State == "running" {
+			log.Printf("Container %s already running (id: %s) — reporting active immediately", containerName, existingID[:12])
+			result.Inspection = ci
+			// Get image digest if available
+			if digest, err := d.docker.GetImageDigest(ctx, opts.ImageTag); err == nil {
+				result.ImageDigest = digest
+			}
+			onProgress("active", "Container already running (reconnect fast path)", existingID[:12], containerName)
+			return result, nil
+		}
+	}
+
 	// Auto-inject endpoint-aware env vars (base path, image-specific config).
 	// Runs BEFORE CMD extraction so image handlers can provide default CMDs.
 	if opts.Env == nil {
