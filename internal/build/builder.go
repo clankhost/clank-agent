@@ -105,11 +105,18 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 		return nil, fmt.Errorf("no Dockerfile found in repository and no platform-generated Dockerfile provided")
 	}
 
-	// Step 3: Build image
+	// Step 3: Build image (with layer cache from previous build)
 	imageTag := fmt.Sprintf("clank-%s:%s", opts.ServiceSlug, opts.DeploymentID[:12])
+
+	var cacheFrom []string
+	if prev := b.docker.LatestImageForSlug(ctx, opts.ServiceSlug); prev != "" {
+		cacheFrom = []string{prev}
+		logLine(fmt.Sprintf("Using layer cache from %s", prev))
+	}
+
 	logLine(fmt.Sprintf("Building image %s...", imageTag))
 
-	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, func(msg string) {
+	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, cacheFrom, func(msg string) {
 		log.Printf("  [build] %s", msg)
 		logLine(msg)
 	})

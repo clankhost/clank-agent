@@ -163,7 +163,8 @@ func (m *Manager) PushImage(ctx context.Context, img string, auth *RegistryAuth,
 }
 
 // BuildImage builds a Docker image from a context directory.
-func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile string, onLog func(string)) error {
+// cacheFrom optionally specifies images to use as layer cache sources.
+func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile string, cacheFrom []string, onLog func(string)) error {
 	onLog(fmt.Sprintf("Building image %s...", tag))
 
 	// Create a tar archive of the build context
@@ -177,6 +178,7 @@ func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile s
 		Tags:       []string{tag},
 		Dockerfile: dockerfile,
 		Remove:     true,
+		CacheFrom:  cacheFrom,
 		// Limit build resources to prevent runaway builds from exhausting host
 		Memory:   2 * 1024 * 1024 * 1024, // 2 GB
 		CPUQuota: 200000,                  // 2 cores (100000 per core)
@@ -465,6 +467,28 @@ func (m *Manager) GetImageDigest(ctx context.Context, imageRef string) (string, 
 }
 
 // PruneServiceImages removes old build images for a service, keeping the
+// LatestImageForSlug returns the most recent image tag for a service slug,
+// or empty string if none found. Used as a cache source for builds.
+func (m *Manager) LatestImageForSlug(ctx context.Context, slug string) string {
+	tagPrefix := fmt.Sprintf("clank-%s:", slug)
+	images, err := m.cli.ImageList(ctx, image.ListOptions{All: false})
+	if err != nil {
+		return ""
+	}
+
+	var newest string
+	var newestTime int64
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, tagPrefix) && img.Created > newestTime {
+				newest = tag
+				newestTime = img.Created
+			}
+		}
+	}
+	return newest
+}
+
 // most recent `keep` images. Best-effort: skips images in use.
 // Returns the number of images pruned.
 func (m *Manager) PruneServiceImages(ctx context.Context, slug string, keep int) (int, error) {
