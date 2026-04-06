@@ -494,7 +494,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		// Prune old local build images for this service (keep last 3).
 		// Only for git-build deploys (not pre-built image deploys).
 		if cmd.GetRepoUrl() != "" {
-			if pruned, err := h.docker.PruneServiceImages(ctx, slug, 3); err != nil {
+			if pruned, err := h.docker.PruneServiceImages(ctx, slug, 2); err != nil {
 				log.Printf("Warning: image prune failed for %s: %v", slug, err)
 			} else if pruned > 0 {
 				log.Printf("Pruned %d old image(s) for service %s", pruned, slug)

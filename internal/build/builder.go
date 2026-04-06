@@ -116,13 +116,21 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 
 	logLine(fmt.Sprintf("Building image %s...", imageTag))
 
-	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, cacheFrom, func(msg string) {
+	buildLog := func(msg string) {
 		log.Printf("  [build] %s", msg)
 		logLine(msg)
-	})
+	}
+	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, cacheFrom, buildLog)
+	if err != nil && len(cacheFrom) > 0 && !isTimeout(ctx) {
+		// Cache-related build failures (moby-dangling corruption, missing layers)
+		// should not be fatal — retry without cache.
+		logLine(fmt.Sprintf("Build with cache failed: %v", err))
+		logLine("Retrying build without cache...")
+		err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, nil, buildLog)
+	}
 	if err != nil {
 		logLine(fmt.Sprintf("Build failed: %v", err))
-		if ctx.Err() == context.DeadlineExceeded {
+		if isTimeout(ctx) {
 			return nil, fmt.Errorf("build timed out after %v", timeout)
 		}
 		return nil, fmt.Errorf("docker build failed: %w", err)
@@ -134,4 +142,8 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 		ImageTag: imageTag,
 		GitSHA:   gitSHA,
 	}, nil
+}
+
+func isTimeout(ctx context.Context) bool {
+	return ctx.Err() == context.DeadlineExceeded
 }
