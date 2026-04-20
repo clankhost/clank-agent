@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,6 +25,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	goarchive "github.com/moby/go-archive"
+	"github.com/shirou/gopsutil/v4/disk"
 )
 
 // Manager wraps the Docker Engine API.
@@ -181,7 +183,7 @@ func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile s
 		CacheFrom:  cacheFrom,
 		// Limit build resources to prevent runaway builds from exhausting host
 		Memory:   2 * 1024 * 1024 * 1024, // 2 GB
-		CPUQuota: 200000,                  // 2 cores (100000 per core)
+		CPUQuota: 200000,                 // 2 cores (100000 per core)
 	})
 	if err != nil {
 		return fmt.Errorf("building image: %w", err)
@@ -863,6 +865,17 @@ type DiskUsageResult struct {
 	Volumes         []VolumeUsage
 }
 
+type cleanupArtifact struct {
+	ID    string
+	Bytes int64
+}
+
+type cleanupPlan struct {
+	summary           *CleanupSummary
+	stoppedContainers []cleanupArtifact
+	unusedImages      []cleanupArtifact
+}
+
 // DiskUsage calls the Docker /system/df endpoint and returns an aggregate
 // breakdown of disk consumed by images, build cache, container writable layers,
 // and per-volume sizes.
@@ -908,4 +921,248 @@ func (m *Manager) DiskUsage(ctx context.Context) (*DiskUsageResult, error) {
 		ContainersBytes: containersBytes,
 		Volumes:         volumes,
 	}, nil
+}
+
+// GetDockerRootUsage returns free/used bytes for the filesystem backing
+// Docker's storage root (e.g. /var/lib/docker).
+func (m *Manager) GetDockerRootUsage(ctx context.Context) (*DockerRootUsage, error) {
+	info, err := m.cli.Info(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("docker info: %w", err)
+	}
+	dockerRoot := info.DockerRootDir
+	if dockerRoot == "" {
+		dockerRoot = "/var/lib/docker"
+	}
+
+	usage, err := disk.Usage(dockerRoot)
+	if err != nil {
+		return nil, fmt.Errorf("disk usage for %s: %w", dockerRoot, err)
+	}
+
+	return &DockerRootUsage{
+		DockerRootDir: dockerRoot,
+		TotalBytes:    usage.Total,
+		UsedBytes:     usage.Used,
+		FreeBytes:     usage.Free,
+	}, nil
+}
+
+// EstimateImageSize returns a best-effort byte estimate for an upcoming
+// image pull/build. Zero means no estimate was available.
+func (m *Manager) EstimateImageSize(ctx context.Context, imageRef, serviceSlug string) (int64, error) {
+	best := int64(0)
+
+	if imageRef != "" {
+		inspect, _, err := m.cli.ImageInspectWithRaw(ctx, imageRef)
+		if err == nil && inspect.Size > best {
+			best = inspect.Size
+		}
+	}
+
+	if serviceSlug == "" {
+		return best, nil
+	}
+
+	images, err := m.cli.ImageList(ctx, image.ListOptions{All: false})
+	if err != nil {
+		return best, fmt.Errorf("listing images: %w", err)
+	}
+
+	tagPrefix := fmt.Sprintf("clank-%s:", serviceSlug)
+	for _, img := range images {
+		for _, tag := range img.RepoTags {
+			if strings.HasPrefix(tag, tagPrefix) && img.Size > best {
+				best = img.Size
+			}
+		}
+	}
+
+	return best, nil
+}
+
+func (m *Manager) computeCleanupPlan(ctx context.Context, protectedImageRefs []string) (*cleanupPlan, error) {
+	protected := make(map[string]struct{}, len(protectedImageRefs))
+	for _, ref := range protectedImageRefs {
+		if ref != "" {
+			protected[ref] = struct{}{}
+		}
+	}
+
+	du, err := m.cli.DiskUsage(ctx, dockertypes.DiskUsageOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("docker disk usage: %w", err)
+	}
+
+	runningImageIDs := make(map[string]struct{})
+	stoppedContainers := make([]cleanupArtifact, 0)
+	stoppedBytes := int64(0)
+	for _, c := range du.Containers {
+		if c == nil {
+			continue
+		}
+		if c.State == "running" {
+			if c.ImageID != "" {
+				runningImageIDs[c.ImageID] = struct{}{}
+			}
+			continue
+		}
+		if c.ID != "" {
+			stoppedContainers = append(stoppedContainers, cleanupArtifact{
+				ID:    c.ID,
+				Bytes: c.SizeRw,
+			})
+		}
+		if c.SizeRw > 0 {
+			stoppedBytes += c.SizeRw
+		}
+	}
+
+	unusedImages := make([]cleanupArtifact, 0)
+	unusedBytes := int64(0)
+	danglingCount := 0
+	danglingBytes := int64(0)
+	for _, img := range du.Images {
+		if img == nil {
+			continue
+		}
+		if _, inUse := runningImageIDs[img.ID]; inUse {
+			continue
+		}
+
+		refs := make([]string, 0, len(img.RepoTags)+len(img.RepoDigests))
+		for _, tag := range img.RepoTags {
+			if tag != "" && tag != "<none>:<none>" {
+				refs = append(refs, tag)
+			}
+		}
+		for _, digest := range img.RepoDigests {
+			if digest != "" && digest != "<none>@<none>" {
+				refs = append(refs, digest)
+			}
+		}
+
+		if len(refs) == 0 {
+			danglingCount++
+			if img.Size > 0 {
+				danglingBytes += img.Size
+			}
+			continue
+		}
+
+		skip := false
+		for _, ref := range refs {
+			if _, ok := protected[ref]; ok {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		ref := refs[0]
+		unusedImages = append(unusedImages, cleanupArtifact{
+			ID:    ref,
+			Bytes: img.Size,
+		})
+		if img.Size > 0 {
+			unusedBytes += img.Size
+		}
+	}
+
+	buildCacheCount := 0
+	buildCacheBytes := int64(0)
+	for _, entry := range du.BuildCache {
+		if entry == nil || entry.InUse {
+			continue
+		}
+		buildCacheCount++
+		if entry.Size > 0 {
+			buildCacheBytes += entry.Size
+		}
+	}
+
+	return &cleanupPlan{
+		summary: &CleanupSummary{
+			ProtectedImageRefs: sortedKeys(protected),
+			StoppedContainers: CleanupSection{
+				Count:            len(stoppedContainers),
+				ReclaimableBytes: stoppedBytes,
+			},
+			UnusedImages: CleanupSection{
+				Count:            len(unusedImages),
+				ReclaimableBytes: unusedBytes,
+			},
+			BuildCache: CleanupSection{
+				Count:            buildCacheCount + danglingCount,
+				ReclaimableBytes: buildCacheBytes + danglingBytes,
+			},
+			ReclaimableBytes: stoppedBytes + unusedBytes + buildCacheBytes + danglingBytes,
+		},
+		stoppedContainers: stoppedContainers,
+		unusedImages:      unusedImages,
+	}, nil
+}
+
+// PreviewCleanup returns a dry-run summary of reclaimable Docker artifacts.
+func (m *Manager) PreviewCleanup(ctx context.Context, protectedImageRefs []string) (*CleanupSummary, error) {
+	plan, err := m.computeCleanupPlan(ctx, protectedImageRefs)
+	if err != nil {
+		return nil, err
+	}
+	summary := *plan.summary
+	return &summary, nil
+}
+
+// ApplyCleanup removes stopped containers, unused images, dangling images,
+// and build cache while preserving protected image refs and running images.
+func (m *Manager) ApplyCleanup(ctx context.Context, protectedImageRefs []string) (*CleanupSummary, error) {
+	plan, err := m.computeCleanupPlan(ctx, protectedImageRefs)
+	if err != nil {
+		return nil, err
+	}
+
+	reclaimedActual := int64(0)
+	for _, containerRef := range plan.stoppedContainers {
+		if err := m.cli.ContainerRemove(ctx, containerRef.ID, container.RemoveOptions{Force: true}); err != nil {
+			log.Printf("Warning: failed to remove stopped container %s: %v", containerRef.ID, err)
+			continue
+		}
+		reclaimedActual += containerRef.Bytes
+	}
+
+	for _, imageRef := range plan.unusedImages {
+		if _, err := m.cli.ImageRemove(ctx, imageRef.ID, image.RemoveOptions{Force: false, PruneChildren: true}); err != nil {
+			log.Printf("Warning: failed to remove image %s: %v", imageRef.ID, err)
+			continue
+		}
+		reclaimedActual += imageRef.Bytes
+	}
+
+	if report, err := m.cli.ImagesPrune(ctx, filters.NewArgs(filters.Arg("dangling", "true"))); err != nil {
+		log.Printf("Warning: dangling image prune failed: %v", err)
+	} else {
+		reclaimedActual += int64(report.SpaceReclaimed)
+	}
+
+	if report, err := m.cli.BuildCachePrune(ctx, build.CachePruneOptions{}); err != nil {
+		log.Printf("Warning: build cache prune failed: %v", err)
+	} else if report != nil {
+		reclaimedActual += int64(report.SpaceReclaimed)
+	}
+
+	summary := *plan.summary
+	summary.Applied = true
+	summary.ReclaimedBytesActual = reclaimedActual
+	return &summary, nil
+}
+
+func sortedKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }

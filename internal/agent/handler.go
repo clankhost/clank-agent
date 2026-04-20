@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -28,6 +29,11 @@ var terminalDeployStatuses = map[string]bool{
 	"failed":       true,
 	"build_failed": true,
 }
+
+const (
+	deployDiskGuardMinFreeBytes int64 = 8 * 1024 * 1024 * 1024
+	deployDiskGuardReserveBytes int64 = 4 * 1024 * 1024 * 1024
+)
 
 // CommandHandler processes commands received from the control plane.
 type CommandHandler struct {
@@ -215,6 +221,94 @@ func (h *CommandHandler) clearDeploymentSeen(deployID string) {
 	}
 }
 
+func (h *CommandHandler) evaluateDeployDiskGuard(ctx context.Context, cmd *clankv1.DeployCommand) (map[string]any, error) {
+	usage, err := h.docker.GetDockerRootUsage(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("evaluating Docker root usage: %w", err)
+	}
+
+	estimatedBytes, err := h.docker.EstimateImageSize(ctx, cmd.GetImageTag(), cmd.GetServiceSlug())
+	if err != nil {
+		log.Printf("Warning: failed to estimate image size for deployment %s: %v", cmd.GetDeploymentId(), err)
+		estimatedBytes = 0
+	}
+
+	preview, err := h.docker.PreviewCleanup(ctx, nil)
+	if err != nil {
+		log.Printf("Warning: failed to preview Docker cleanup for deployment %s: %v", cmd.GetDeploymentId(), err)
+		preview = &docker.CleanupSummary{}
+	}
+
+	freeBytes := int64(usage.FreeBytes)
+	reasons := make([]string, 0, 2)
+	if freeBytes < deployDiskGuardMinFreeBytes {
+		reasons = append(
+			reasons,
+			fmt.Sprintf(
+				"Docker root free space %d is below minimum %d",
+				freeBytes,
+				deployDiskGuardMinFreeBytes,
+			),
+		)
+	}
+	if estimatedBytes > 0 && (freeBytes-estimatedBytes) < deployDiskGuardReserveBytes {
+		reasons = append(
+			reasons,
+			fmt.Sprintf(
+				"Estimated image size would leave less than the required reserve (%d bytes)",
+				deployDiskGuardReserveBytes,
+			),
+		)
+	}
+
+	wouldBlock := len(reasons) > 0
+	return map[string]any{
+		"failure_kind":      "preflight_blocked",
+		"check":             "docker_disk_guard",
+		"blocked":           wouldBlock && !cmd.GetForce(),
+		"would_block":       wouldBlock,
+		"forced":            cmd.GetForce(),
+		"docker_root_dir":   usage.DockerRootDir,
+		"free_bytes":        freeBytes,
+		"total_bytes":       int64(usage.TotalBytes),
+		"used_bytes":        int64(usage.UsedBytes),
+		"estimated_bytes":   estimatedBytes,
+		"min_free_bytes":    deployDiskGuardMinFreeBytes,
+		"reserve_bytes":     deployDiskGuardReserveBytes,
+		"reclaimable_bytes": preview.ReclaimableBytes,
+		"cleanup_preview":   preview,
+		"reasons":           reasons,
+		"recommended_actions": []string{
+			"Run Docker cleanup preview/apply to reclaim space",
+			"Delete old unused images or stopped containers",
+			"Use --force only if you intentionally want to bypass the disk guard",
+		},
+	}, nil
+}
+
+func summarizeDiskGuard(details map[string]any) string {
+	summary := fmt.Sprintf(
+		"Deploy blocked by Docker disk guard on %v",
+		details["docker_root_dir"],
+	)
+	if reasons, ok := details["reasons"].([]string); ok && len(reasons) > 0 {
+		summary += ": " + strings.Join(reasons, "; ")
+		return summary
+	}
+	if reasonsAny, ok := details["reasons"].([]any); ok && len(reasonsAny) > 0 {
+		text := make([]string, 0, len(reasonsAny))
+		for _, reason := range reasonsAny {
+			if reasonStr, ok := reason.(string); ok && reasonStr != "" {
+				text = append(text, reasonStr)
+			}
+		}
+		if len(text) > 0 {
+			summary += ": " + strings.Join(text, "; ")
+		}
+	}
+	return summary
+}
+
 // HandleDeploy processes a DeployCommand — clone+build or image pull, then deploy.
 func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.DeployCommand) {
 	deployID := cmd.GetDeploymentId()
@@ -279,7 +373,7 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 
 	// sendTerminalProgress sends a terminal (active/failed) progress with
 	// introspection data and startup logs attached.
-	sendTerminalProgress := func(status, message, containerID, containerName, imageTag, gitSHA string, result *deploy.DeployResult) {
+	sendTerminalProgress := func(status, message, containerID, containerName, imageTag, gitSHA string, result *deploy.DeployResult, detailsJSON string) {
 		dp := &clankv1.DeployProgress{
 			DeploymentId:  deployID,
 			Status:        status,
@@ -314,6 +408,9 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 			// Build ContainerIntrospection (Phase B)
 			dp.Introspection = buildIntrospectionProto(result)
 		}
+		if detailsJSON != "" {
+			dp.DetailsJson = sanitizeUTF8(detailsJSON)
+		}
 
 		msg := &clankv1.AgentMessage{
 			Payload: &clankv1.AgentMessage_DeployProgress{
@@ -343,6 +440,29 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 
 	imageTag := cmd.GetImageTag()
 	var gitSHA string
+
+	diskGuard, err := h.evaluateDeployDiskGuard(ctx, cmd)
+	if err != nil {
+		sendTerminalProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA, nil, "")
+		return
+	}
+	if blocked, _ := diskGuard["blocked"].(bool); blocked {
+		detailsJSON, _ := json.Marshal(diskGuard)
+		sendTerminalProgress(
+			"failed",
+			summarizeDiskGuard(diskGuard),
+			"",
+			"",
+			imageTag,
+			gitSHA,
+			nil,
+			string(detailsJSON),
+		)
+		return
+	}
+	if wouldBlock, _ := diskGuard["would_block"].(bool); wouldBlock && cmd.GetForce() {
+		buildLog("WARNING: Docker disk guard would have blocked this deploy, but --force was set so deployment is continuing.")
+	}
 
 	// Phase 1: Build (if repo_url is set)
 	if cmd.GetRepoUrl() != "" {
@@ -481,24 +601,14 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 	})
 
 	if err != nil {
-		sendTerminalProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA, deployResult)
+		sendTerminalProgress("failed", fmt.Sprintf("Deploy failed: %v", err), "", "", imageTag, gitSHA, deployResult, "")
 	} else {
 		deploySuccess = true
 		// Send a supplementary "active" message with introspection and digest.
 		// The deployer already sent "active" via onProgress, but without extras.
 		// The API ignores duplicate "active" transitions but stores attached data.
 		if deployResult != nil && (deployResult.Inspection != nil || len(deployResult.Ports) > 0 || deployResult.EffectivePort != int(cmd.GetPort()) || deployResult.ImageDigest != "") {
-			sendTerminalProgress("active", "Deployment active (introspection attached)", "", "", imageTag, gitSHA, deployResult)
-		}
-
-		// Prune old local build images for this service (keep last 3).
-		// Only for git-build deploys (not pre-built image deploys).
-		if cmd.GetRepoUrl() != "" {
-			if pruned, err := h.docker.PruneServiceImages(ctx, slug, 2); err != nil {
-				log.Printf("Warning: image prune failed for %s: %v", slug, err)
-			} else if pruned > 0 {
-				log.Printf("Pruned %d old image(s) for service %s", pruned, slug)
-			}
+			sendTerminalProgress("active", "Deployment active (introspection attached)", "", "", imageTag, gitSHA, deployResult, "")
 		}
 	}
 }
@@ -853,18 +963,66 @@ func (h *CommandHandler) HandleEndpoint(ctx context.Context, stream grpcclient.C
 	msg := &clankv1.AgentMessage{
 		Payload: &clankv1.AgentMessage_EndpointStatus{
 			EndpointStatus: &clankv1.EndpointStatus{
-				CommandId:   cmd.GetCommandId(),
-				EndpointId:  cmd.GetEndpointId(),
-				Status:      result.Status,
-				Message:     sanitizeUTF8(result.Message),
-				ResolvedUrl: result.ResolvedURL,
-				VerifiedBy:  result.VerifiedBy,
-				Diagnostics: diagnostics,
+				CommandId:    cmd.GetCommandId(),
+				EndpointId:   cmd.GetEndpointId(),
+				Status:       result.Status,
+				Message:      sanitizeUTF8(result.Message),
+				ResolvedUrl:  result.ResolvedURL,
+				VerifiedBy:   result.VerifiedBy,
+				RouteStatus:  result.RouteStatus,
+				PublicStatus: result.PublicStatus,
+				Diagnostics:  diagnostics,
 			},
 		},
 	}
 	if err := stream.Send(msg); err != nil {
 		log.Printf("Failed to send endpoint status: %v", err)
+	}
+}
+
+// HandleMaintenance previews or applies safe Docker cleanup.
+func (h *CommandHandler) HandleMaintenance(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.MaintenanceCommand) {
+	log.Printf("Handling maintenance command %s: %s", cmd.GetCommandId(), cmd.GetAction())
+
+	var (
+		summary *docker.CleanupSummary
+		err     error
+	)
+
+	switch cmd.GetAction() {
+	case clankv1.MaintenanceCommand_PREVIEW_DOCKER_CLEANUP:
+		summary, err = h.docker.PreviewCleanup(ctx, cmd.GetProtectedImageRefs())
+	case clankv1.MaintenanceCommand_APPLY_DOCKER_CLEANUP:
+		summary, err = h.docker.ApplyCleanup(ctx, cmd.GetProtectedImageRefs())
+	default:
+		err = fmt.Errorf("unknown maintenance action: %v", cmd.GetAction())
+	}
+
+	success := err == nil
+	output := ""
+	if err != nil {
+		output = err.Error()
+	} else if summary != nil {
+		payload, marshalErr := json.Marshal(summary)
+		if marshalErr != nil {
+			success = false
+			output = fmt.Sprintf("marshal cleanup result: %v", marshalErr)
+		} else {
+			output = string(payload)
+		}
+	}
+
+	msg := &clankv1.AgentMessage{
+		Payload: &clankv1.AgentMessage_CommandResult{
+			CommandResult: &clankv1.CommandResult{
+				CommandId: cmd.GetCommandId(),
+				Success:   success,
+				Output:    sanitizeUTF8(output),
+			},
+		},
+	}
+	if sendErr := stream.Send(msg); sendErr != nil {
+		log.Printf("Failed to send maintenance result: %v", sendErr)
 	}
 }
 

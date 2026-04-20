@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/clankhost/clank-agent/internal/docker"
 )
@@ -107,11 +108,41 @@ func (p *CFTunnelProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*Pro
 		diag["container_check"] = "running"
 	}
 
+	routeStatus, routeMessage, routeHTTP, routeErr := probeRoutedEndpoint(cfg.Hostname, cfg.PathPrefix, 10*time.Second)
+	if routeErr != nil {
+		diag["route_check"] = routeMessage
+	} else {
+		diag["route_check"] = fmt.Sprintf("%s (status %d)", routeStatus, routeHTTP)
+	}
+
+	publicURL := fmt.Sprintf("https://%s%s", cfg.Hostname, cfg.PathPrefix)
+	publicStatus, publicMessage, publicHTTP, publicErr := probePublicURL(publicURL, 10*time.Second)
+	if publicErr != nil {
+		diag["public_check"] = publicMessage
+	} else {
+		diag["public_check"] = fmt.Sprintf("%s (status %d)", publicStatus, publicHTTP)
+	}
+
+	status := "active"
+	message := fmt.Sprintf("Cloudflare tunnel healthy (%s)", name)
+	verifiedBy := "public"
+	if routeStatus != "healthy" {
+		status = "degraded"
+		message = fmt.Sprintf("Local route behind the Cloudflare tunnel is unhealthy (%s)", name)
+		verifiedBy = "agent"
+	} else if publicStatus != "healthy" {
+		status = "degraded"
+		message = "Cloudflare public endpoint is failing even though local routing works"
+		verifiedBy = "agent"
+	}
+
 	return &ProviderStatus{
-		Status:      "active",
-		Message:     fmt.Sprintf("Cloudflare tunnel healthy (%s)", name),
-		ResolvedURL: fmt.Sprintf("https://%s", cfg.Hostname),
-		VerifiedBy:  "agent",
-		Diagnostics: diag,
+		Status:       status,
+		Message:      message,
+		ResolvedURL:  publicURL,
+		VerifiedBy:   verifiedBy,
+		RouteStatus:  routeStatus,
+		PublicStatus: publicStatus,
+		Diagnostics:  diag,
 	}, nil
 }

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"time"
 )
 
@@ -112,13 +111,18 @@ func (p *DirectProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*Provi
 	}
 
 	// HTTPS check (best-effort)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("https://%s/", cfg.Hostname))
-	if err != nil {
-		diag["https_check"] = fmt.Sprintf("error: %v", err)
+	routeStatus, routeMessage, routeHTTP, routeErr := probeRoutedEndpoint(cfg.Hostname, "", 10*time.Second)
+	if routeErr != nil {
+		diag["route_check"] = routeMessage
 	} else {
-		resp.Body.Close()
-		diag["https_check"] = fmt.Sprintf("ok (status %d)", resp.StatusCode)
+		diag["route_check"] = fmt.Sprintf("%s (status %d)", routeStatus, routeHTTP)
+	}
+
+	publicStatus, publicMessage, publicHTTP, publicErr := probePublicURL(fmt.Sprintf("https://%s/", cfg.Hostname), 10*time.Second)
+	if publicErr != nil {
+		diag["https_check"] = publicMessage
+	} else {
+		diag["https_check"] = fmt.Sprintf("%s (status %d)", publicStatus, publicHTTP)
 	}
 
 	status := "active"
@@ -135,17 +139,23 @@ func (p *DirectProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*Provi
 		}
 		message = "Port 443 is not reachable. Check your firewall settings."
 	}
-	if diag["https_check"] != "" && diag["https_check"][:2] != "ok" {
+	if routeStatus != "healthy" {
 		status = "degraded"
-		message = "Let's Encrypt certificate may not be issued yet. Ensure DNS resolves and ports 80/443 are open."
+		message = fmt.Sprintf("Local Traefik route is unhealthy for %s", cfg.Hostname)
+		verified = "agent"
+	} else if publicStatus != "healthy" {
+		status = "degraded"
+		message = "Public HTTPS check failed even though local routing works"
 		verified = "agent"
 	}
 
 	return &ProviderStatus{
-		Status:      status,
-		Message:     message,
-		ResolvedURL: fmt.Sprintf("https://%s", cfg.Hostname),
-		VerifiedBy:  verified,
-		Diagnostics: diag,
+		Status:       status,
+		Message:      message,
+		ResolvedURL:  fmt.Sprintf("https://%s", cfg.Hostname),
+		VerifiedBy:   verified,
+		RouteStatus:  routeStatus,
+		PublicStatus: publicStatus,
+		Diagnostics:  diag,
 	}, nil
 }

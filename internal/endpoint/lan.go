@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net/http"
 	"time"
 )
 
@@ -41,30 +40,30 @@ func (p *LANProvider) Disable(ctx context.Context, cfg ProviderConfig) (*Provide
 
 func (p *LANProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*ProviderStatus, error) {
 	diag := map[string]string{}
-
-	// Check if we can reach the service via Traefik locally
-	url := fmt.Sprintf("http://localhost:%d/", 80)
-	client := &http.Client{Timeout: 5 * time.Second}
-
-	resp, err := client.Get(url)
-	if err != nil {
-		diag["traefik_reachable"] = fmt.Sprintf("error: %v", err)
+	hostname := cfg.Hostname
+	if hostname == "" {
+		hostname = cfg.ServiceSlug + ".local"
+	}
+	routeStatus, routeMessage, routeHTTP, routeErr := probeRoutedEndpoint(hostname, cfg.PathPrefix, 5*time.Second)
+	if routeErr != nil {
+		diag["route_check"] = routeMessage
 	} else {
-		resp.Body.Close()
-		diag["traefik_reachable"] = "ok"
+		diag["route_check"] = fmt.Sprintf("%s (status %d)", routeStatus, routeHTTP)
 	}
 
 	status := "active"
 	message := "LAN endpoint healthy"
-	if diag["traefik_reachable"] != "ok" {
+	if routeStatus != "healthy" {
 		status = "degraded"
-		message = "Traefik not reachable on port 80"
+		message = "LAN route is not reachable through Traefik"
 	}
 
 	return &ProviderStatus{
-		Status:      status,
-		Message:     message,
-		VerifiedBy:  "agent",
-		Diagnostics: diag,
+		Status:       status,
+		Message:      message,
+		VerifiedBy:   "agent",
+		RouteStatus:  routeStatus,
+		PublicStatus: "not_applicable",
+		Diagnostics:  diag,
 	}, nil
 }

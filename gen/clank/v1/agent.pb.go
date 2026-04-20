@@ -123,6 +123,52 @@ func (EndpointCommand_Action) EnumDescriptor() ([]byte, []int) {
 	return file_clank_v1_agent_proto_rawDescGZIP(), []int{29, 0}
 }
 
+type MaintenanceCommand_Action int32
+
+const (
+	MaintenanceCommand_PREVIEW_DOCKER_CLEANUP MaintenanceCommand_Action = 0
+	MaintenanceCommand_APPLY_DOCKER_CLEANUP   MaintenanceCommand_Action = 1
+)
+
+// Enum value maps for MaintenanceCommand_Action.
+var (
+	MaintenanceCommand_Action_name = map[int32]string{
+		0: "PREVIEW_DOCKER_CLEANUP",
+		1: "APPLY_DOCKER_CLEANUP",
+	}
+	MaintenanceCommand_Action_value = map[string]int32{
+		"PREVIEW_DOCKER_CLEANUP": 0,
+		"APPLY_DOCKER_CLEANUP":   1,
+	}
+)
+
+func (x MaintenanceCommand_Action) Enum() *MaintenanceCommand_Action {
+	p := new(MaintenanceCommand_Action)
+	*p = x
+	return p
+}
+
+func (x MaintenanceCommand_Action) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (MaintenanceCommand_Action) Descriptor() protoreflect.EnumDescriptor {
+	return file_clank_v1_agent_proto_enumTypes[2].Descriptor()
+}
+
+func (MaintenanceCommand_Action) Type() protoreflect.EnumType {
+	return &file_clank_v1_agent_proto_enumTypes[2]
+}
+
+func (x MaintenanceCommand_Action) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use MaintenanceCommand_Action.Descriptor instead.
+func (MaintenanceCommand_Action) EnumDescriptor() ([]byte, []int) {
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{31, 0}
+}
+
 type EnrollRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// One-time enrollment token (shown once at server creation).
@@ -812,7 +858,10 @@ type DeployProgress struct {
 	// Effective port used (may differ from configured port due to auto-fill) (Phase D)
 	EffectivePort int32 `protobuf:"varint,10,opt,name=effective_port,json=effectivePort,proto3" json:"effective_port,omitempty"`
 	// sha256 digest of the deployed image (ADR-006 image tracking)
-	ImageDigest   string `protobuf:"bytes,11,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
+	ImageDigest string `protobuf:"bytes,11,opt,name=image_digest,json=imageDigest,proto3" json:"image_digest,omitempty"`
+	// Optional structured JSON payload for special failure modes such as
+	// preflight blockers. Parsed by the control plane when present.
+	DetailsJson   string `protobuf:"bytes,12,opt,name=details_json,json=detailsJson,proto3" json:"details_json,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -920,6 +969,13 @@ func (x *DeployProgress) GetEffectivePort() int32 {
 func (x *DeployProgress) GetImageDigest() string {
 	if x != nil {
 		return x.ImageDigest
+	}
+	return ""
+}
+
+func (x *DeployProgress) GetDetailsJson() string {
+	if x != nil {
+		return x.DetailsJson
 	}
 	return ""
 }
@@ -1248,6 +1304,7 @@ type ControlMessage struct {
 	//	*ControlMessage_EndpointCmd
 	//	*ControlMessage_BackupCmd
 	//	*ControlMessage_PushImage
+	//	*ControlMessage_MaintenanceCmd
 	Payload       isControlMessage_Payload `protobuf_oneof:"payload"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1380,6 +1437,15 @@ func (x *ControlMessage) GetPushImage() *PushImageCommand {
 	return nil
 }
 
+func (x *ControlMessage) GetMaintenanceCmd() *MaintenanceCommand {
+	if x != nil {
+		if x, ok := x.Payload.(*ControlMessage_MaintenanceCmd); ok {
+			return x.MaintenanceCmd
+		}
+	}
+	return nil
+}
+
 type isControlMessage_Payload interface {
 	isControlMessage_Payload()
 }
@@ -1424,6 +1490,10 @@ type ControlMessage_PushImage struct {
 	PushImage *PushImageCommand `protobuf:"bytes,10,opt,name=push_image,json=pushImage,proto3,oneof"`
 }
 
+type ControlMessage_MaintenanceCmd struct {
+	MaintenanceCmd *MaintenanceCommand `protobuf:"bytes,11,opt,name=maintenance_cmd,json=maintenanceCmd,proto3,oneof"`
+}
+
 func (*ControlMessage_Deploy) isControlMessage_Payload() {}
 
 func (*ControlMessage_Secret) isControlMessage_Payload() {}
@@ -1443,6 +1513,8 @@ func (*ControlMessage_EndpointCmd) isControlMessage_Payload() {}
 func (*ControlMessage_BackupCmd) isControlMessage_Payload() {}
 
 func (*ControlMessage_PushImage) isControlMessage_Payload() {}
+
+func (*ControlMessage_MaintenanceCmd) isControlMessage_Payload() {}
 
 // Instructs the agent to download and apply a self-update.
 type UpdateCommand struct {
@@ -1630,8 +1702,10 @@ type DeployCommand struct {
 	// to the clone directory instead of running local auto-detection.
 	// User-provided Dockerfiles in the repo always take priority.
 	GeneratedDockerfile string `protobuf:"bytes,22,opt,name=generated_dockerfile,json=generatedDockerfile,proto3" json:"generated_dockerfile,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Bypass the Docker disk guard only. Other hard failures still block deploy.
+	Force         bool `protobuf:"varint,23,opt,name=force,proto3" json:"force,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DeployCommand) Reset() {
@@ -1816,6 +1890,13 @@ func (x *DeployCommand) GetGeneratedDockerfile() string {
 		return x.GeneratedDockerfile
 	}
 	return ""
+}
+
+func (x *DeployCommand) GetForce() bool {
+	if x != nil {
+		return x.Force
+	}
+	return false
 }
 
 // A named Docker volume mount for persistent storage.
@@ -2709,6 +2790,8 @@ type EndpointStatus struct {
 	ResolvedUrl   string                 `protobuf:"bytes,5,opt,name=resolved_url,json=resolvedUrl,proto3" json:"resolved_url,omitempty"` // actual reachable URL
 	VerifiedBy    string                 `protobuf:"bytes,6,opt,name=verified_by,json=verifiedBy,proto3" json:"verified_by,omitempty"`    // public, agent
 	Diagnostics   map[string]string      `protobuf:"bytes,7,rep,name=diagnostics,proto3" json:"diagnostics,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	RouteStatus   string                 `protobuf:"bytes,8,opt,name=route_status,json=routeStatus,proto3" json:"route_status,omitempty"`    // active, degraded, error, unknown, not_applicable
+	PublicStatus  string                 `protobuf:"bytes,9,opt,name=public_status,json=publicStatus,proto3" json:"public_status,omitempty"` // active, degraded, error, unknown, not_applicable
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2792,6 +2875,89 @@ func (x *EndpointStatus) GetDiagnostics() map[string]string {
 	return nil
 }
 
+func (x *EndpointStatus) GetRouteStatus() string {
+	if x != nil {
+		return x.RouteStatus
+	}
+	return ""
+}
+
+func (x *EndpointStatus) GetPublicStatus() string {
+	if x != nil {
+		return x.PublicStatus
+	}
+	return ""
+}
+
+// Maintenance/cleanup commands for agent-backed servers.
+type MaintenanceCommand struct {
+	state                protoimpl.MessageState    `protogen:"open.v1"`
+	CommandId            string                    `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Action               MaintenanceCommand_Action `protobuf:"varint,2,opt,name=action,proto3,enum=clank.v1.MaintenanceCommand_Action" json:"action,omitempty"`
+	KeepSuccessfulImages int32                     `protobuf:"varint,3,opt,name=keep_successful_images,json=keepSuccessfulImages,proto3" json:"keep_successful_images,omitempty"`
+	ProtectedImageRefs   []string                  `protobuf:"bytes,4,rep,name=protected_image_refs,json=protectedImageRefs,proto3" json:"protected_image_refs,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *MaintenanceCommand) Reset() {
+	*x = MaintenanceCommand{}
+	mi := &file_clank_v1_agent_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MaintenanceCommand) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MaintenanceCommand) ProtoMessage() {}
+
+func (x *MaintenanceCommand) ProtoReflect() protoreflect.Message {
+	mi := &file_clank_v1_agent_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MaintenanceCommand.ProtoReflect.Descriptor instead.
+func (*MaintenanceCommand) Descriptor() ([]byte, []int) {
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *MaintenanceCommand) GetCommandId() string {
+	if x != nil {
+		return x.CommandId
+	}
+	return ""
+}
+
+func (x *MaintenanceCommand) GetAction() MaintenanceCommand_Action {
+	if x != nil {
+		return x.Action
+	}
+	return MaintenanceCommand_PREVIEW_DOCKER_CLEANUP
+}
+
+func (x *MaintenanceCommand) GetKeepSuccessfulImages() int32 {
+	if x != nil {
+		return x.KeepSuccessfulImages
+	}
+	return 0
+}
+
+func (x *MaintenanceCommand) GetProtectedImageRefs() []string {
+	if x != nil {
+		return x.ProtectedImageRefs
+	}
+	return nil
+}
+
 // Instructs the agent to backup a service's data (control plane -> agent).
 type BackupCommand struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
@@ -2812,7 +2978,7 @@ type BackupCommand struct {
 
 func (x *BackupCommand) Reset() {
 	*x = BackupCommand{}
-	mi := &file_clank_v1_agent_proto_msgTypes[31]
+	mi := &file_clank_v1_agent_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2824,7 +2990,7 @@ func (x *BackupCommand) String() string {
 func (*BackupCommand) ProtoMessage() {}
 
 func (x *BackupCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[31]
+	mi := &file_clank_v1_agent_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2837,7 +3003,7 @@ func (x *BackupCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupCommand.ProtoReflect.Descriptor instead.
 func (*BackupCommand) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{31}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *BackupCommand) GetCommandId() string {
@@ -2933,7 +3099,7 @@ type PushImageCommand struct {
 
 func (x *PushImageCommand) Reset() {
 	*x = PushImageCommand{}
-	mi := &file_clank_v1_agent_proto_msgTypes[32]
+	mi := &file_clank_v1_agent_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2945,7 +3111,7 @@ func (x *PushImageCommand) String() string {
 func (*PushImageCommand) ProtoMessage() {}
 
 func (x *PushImageCommand) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[32]
+	mi := &file_clank_v1_agent_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2958,7 +3124,7 @@ func (x *PushImageCommand) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PushImageCommand.ProtoReflect.Descriptor instead.
 func (*PushImageCommand) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{32}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *PushImageCommand) GetDeploymentId() string {
@@ -3004,7 +3170,7 @@ type BackupResult struct {
 
 func (x *BackupResult) Reset() {
 	*x = BackupResult{}
-	mi := &file_clank_v1_agent_proto_msgTypes[33]
+	mi := &file_clank_v1_agent_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3016,7 +3182,7 @@ func (x *BackupResult) String() string {
 func (*BackupResult) ProtoMessage() {}
 
 func (x *BackupResult) ProtoReflect() protoreflect.Message {
-	mi := &file_clank_v1_agent_proto_msgTypes[33]
+	mi := &file_clank_v1_agent_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3029,7 +3195,7 @@ func (x *BackupResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackupResult.ProtoReflect.Descriptor instead.
 func (*BackupResult) Descriptor() ([]byte, []int) {
-	return file_clank_v1_agent_proto_rawDescGZIP(), []int{33}
+	return file_clank_v1_agent_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *BackupResult) GetCommandId() string {
@@ -3138,7 +3304,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\fcontainer_id\x18\x01 \x01(\tR\vcontainerId\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x14\n" +
-	"\x05image\x18\x04 \x01(\tR\x05image\"\x9c\x03\n" +
+	"\x05image\x18\x04 \x01(\tR\x05image\"\xbf\x03\n" +
 	"\x0eDeployProgress\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12\x16\n" +
 	"\x06status\x18\x02 \x01(\tR\x06status\x12\x18\n" +
@@ -3151,7 +3317,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rintrospection\x18\t \x01(\v2 .clank.v1.ContainerIntrospectionR\rintrospection\x12%\n" +
 	"\x0eeffective_port\x18\n" +
 	" \x01(\x05R\reffectivePort\x12!\n" +
-	"\fimage_digest\x18\v \x01(\tR\vimageDigest\"\xa7\x03\n" +
+	"\fimage_digest\x18\v \x01(\tR\vimageDigest\x12!\n" +
+	"\fdetails_json\x18\f \x01(\tR\vdetailsJson\"\xa7\x03\n" +
 	"\x16ContainerIntrospection\x12C\n" +
 	"\x10discovered_ports\x18\x01 \x03(\v2\x18.clank.v1.DiscoveredPortR\x0fdiscoveredPorts\x12!\n" +
 	"\fcontainer_ip\x18\x02 \x01(\tR\vcontainerIp\x12\x1a\n" +
@@ -3178,7 +3345,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x18\n" +
 	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x16\n" +
-	"\x06output\x18\x03 \x01(\tR\x06output\"\xd3\x04\n" +
+	"\x06output\x18\x03 \x01(\tR\x06output\"\x9c\x05\n" +
 	"\x0eControlMessage\x121\n" +
 	"\x06deploy\x18\x01 \x01(\v2\x17.clank.v1.DeployCommandH\x00R\x06deploy\x122\n" +
 	"\x06secret\x18\x02 \x01(\v2\x18.clank.v1.SecretDeliveryH\x00R\x06secret\x12=\n" +
@@ -3192,7 +3359,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"backup_cmd\x18\t \x01(\v2\x17.clank.v1.BackupCommandH\x00R\tbackupCmd\x12;\n" +
 	"\n" +
 	"push_image\x18\n" +
-	" \x01(\v2\x1a.clank.v1.PushImageCommandH\x00R\tpushImageB\t\n" +
+	" \x01(\v2\x1a.clank.v1.PushImageCommandH\x00R\tpushImage\x12G\n" +
+	"\x0fmaintenance_cmd\x18\v \x01(\v2\x1c.clank.v1.MaintenanceCommandH\x00R\x0emaintenanceCmdB\t\n" +
 	"\apayload\"\xa5\x01\n" +
 	"\rUpdateCommand\x12\x18\n" +
 	"\aversion\x18\x01 \x01(\tR\aversion\x12!\n" +
@@ -3202,7 +3370,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\tsignature\x18\x05 \x01(\tR\tsignature\"N\n" +
 	"\fTunnelConfig\x12!\n" +
 	"\ftunnel_token\x18\x01 \x01(\tR\vtunnelToken\x12\x1b\n" +
-	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\xfe\a\n" +
+	"\ttunnel_id\x18\x02 \x01(\tR\btunnelId\"\x94\b\n" +
 	"\rDeployCommand\x12#\n" +
 	"\rdeployment_id\x18\x01 \x01(\tR\fdeploymentId\x12!\n" +
 	"\fservice_slug\x18\x02 \x01(\tR\vserviceSlug\x12\x1b\n" +
@@ -3226,7 +3394,8 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x0fcompanion_slugs\x18\x13 \x03(\tR\x0ecompanionSlugs\x12#\n" +
 	"\rregistry_auth\x18\x14 \x01(\tR\fregistryAuth\x122\n" +
 	"\x15build_timeout_seconds\x18\x15 \x01(\x05R\x13buildTimeoutSeconds\x121\n" +
-	"\x14generated_dockerfile\x18\x16 \x01(\tR\x13generatedDockerfile\x1a:\n" +
+	"\x14generated_dockerfile\x18\x16 \x01(\tR\x13generatedDockerfile\x12\x14\n" +
+	"\x05force\x18\x17 \x01(\bR\x05force\x1a:\n" +
 	"\fEnvVarsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"@\n" +
@@ -3317,7 +3486,7 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\x06ENSURE\x10\x00\x12\v\n" +
 	"\aDISABLE\x10\x01\x12\n" +
 	"\n" +
-	"\x06DOCTOR\x10\x02\"\xd3\x02\n" +
+	"\x06DOCTOR\x10\x02\"\x9b\x03\n" +
 	"\x0eEndpointStatus\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1f\n" +
@@ -3328,10 +3497,21 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\fresolved_url\x18\x05 \x01(\tR\vresolvedUrl\x12\x1f\n" +
 	"\vverified_by\x18\x06 \x01(\tR\n" +
 	"verifiedBy\x12K\n" +
-	"\vdiagnostics\x18\a \x03(\v2).clank.v1.EndpointStatus.DiagnosticsEntryR\vdiagnostics\x1a>\n" +
+	"\vdiagnostics\x18\a \x03(\v2).clank.v1.EndpointStatus.DiagnosticsEntryR\vdiagnostics\x12!\n" +
+	"\froute_status\x18\b \x01(\tR\vrouteStatus\x12#\n" +
+	"\rpublic_status\x18\t \x01(\tR\fpublicStatus\x1a>\n" +
 	"\x10DiagnosticsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x81\x04\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x98\x02\n" +
+	"\x12MaintenanceCommand\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\tR\tcommandId\x12;\n" +
+	"\x06action\x18\x02 \x01(\x0e2#.clank.v1.MaintenanceCommand.ActionR\x06action\x124\n" +
+	"\x16keep_successful_images\x18\x03 \x01(\x05R\x14keepSuccessfulImages\x120\n" +
+	"\x14protected_image_refs\x18\x04 \x03(\tR\x12protectedImageRefs\">\n" +
+	"\x06Action\x12\x1a\n" +
+	"\x16PREVIEW_DOCKER_CLEANUP\x10\x00\x12\x18\n" +
+	"\x14APPLY_DOCKER_CLEANUP\x10\x01\"\x81\x04\n" +
 	"\rBackupCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1b\n" +
@@ -3385,102 +3565,106 @@ func file_clank_v1_agent_proto_rawDescGZIP() []byte {
 	return file_clank_v1_agent_proto_rawDescData
 }
 
-var file_clank_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_clank_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
+var file_clank_v1_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_clank_v1_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
 var file_clank_v1_agent_proto_goTypes = []any{
 	(ContainerCommand_Action)(0),   // 0: clank.v1.ContainerCommand.Action
 	(EndpointCommand_Action)(0),    // 1: clank.v1.EndpointCommand.Action
-	(*EnrollRequest)(nil),          // 2: clank.v1.EnrollRequest
-	(*EnrollResponse)(nil),         // 3: clank.v1.EnrollResponse
-	(*SystemInfo)(nil),             // 4: clank.v1.SystemInfo
-	(*AgentMessage)(nil),           // 5: clank.v1.AgentMessage
-	(*UpdateResult)(nil),           // 6: clank.v1.UpdateResult
-	(*Heartbeat)(nil),              // 7: clank.v1.Heartbeat
-	(*ContainerStatus)(nil),        // 8: clank.v1.ContainerStatus
-	(*DeployProgress)(nil),         // 9: clank.v1.DeployProgress
-	(*ContainerIntrospection)(nil), // 10: clank.v1.ContainerIntrospection
-	(*DiscoveredPort)(nil),         // 11: clank.v1.DiscoveredPort
-	(*PushImageResult)(nil),        // 12: clank.v1.PushImageResult
-	(*CommandResult)(nil),          // 13: clank.v1.CommandResult
-	(*ControlMessage)(nil),         // 14: clank.v1.ControlMessage
-	(*UpdateCommand)(nil),          // 15: clank.v1.UpdateCommand
-	(*TunnelConfig)(nil),           // 16: clank.v1.TunnelConfig
-	(*DeployCommand)(nil),          // 17: clank.v1.DeployCommand
-	(*VolumeMount)(nil),            // 18: clank.v1.VolumeMount
-	(*HealthCheckConfig)(nil),      // 19: clank.v1.HealthCheckConfig
-	(*ResourceConfig)(nil),         // 20: clank.v1.ResourceConfig
-	(*ContainerCommand)(nil),       // 21: clank.v1.ContainerCommand
-	(*SecretDelivery)(nil),         // 22: clank.v1.SecretDelivery
-	(*CertRotation)(nil),           // 23: clank.v1.CertRotation
-	(*Ping)(nil),                   // 24: clank.v1.Ping
-	(*LogEntry)(nil),               // 25: clank.v1.LogEntry
-	(*LogAck)(nil),                 // 26: clank.v1.LogAck
-	(*MetricBatch)(nil),            // 27: clank.v1.MetricBatch
-	(*Metric)(nil),                 // 28: clank.v1.Metric
-	(*MetricAck)(nil),              // 29: clank.v1.MetricAck
-	(*EndpointInfo)(nil),           // 30: clank.v1.EndpointInfo
-	(*EndpointCommand)(nil),        // 31: clank.v1.EndpointCommand
-	(*EndpointStatus)(nil),         // 32: clank.v1.EndpointStatus
-	(*BackupCommand)(nil),          // 33: clank.v1.BackupCommand
-	(*PushImageCommand)(nil),       // 34: clank.v1.PushImageCommand
-	(*BackupResult)(nil),           // 35: clank.v1.BackupResult
-	nil,                            // 36: clank.v1.DeployCommand.EnvVarsEntry
-	nil,                            // 37: clank.v1.SecretDelivery.EnvVarsEntry
-	nil,                            // 38: clank.v1.Metric.LabelsEntry
-	nil,                            // 39: clank.v1.EndpointCommand.ProviderConfigEntry
-	nil,                            // 40: clank.v1.EndpointStatus.DiagnosticsEntry
-	nil,                            // 41: clank.v1.BackupCommand.EnvVarsEntry
+	(MaintenanceCommand_Action)(0), // 2: clank.v1.MaintenanceCommand.Action
+	(*EnrollRequest)(nil),          // 3: clank.v1.EnrollRequest
+	(*EnrollResponse)(nil),         // 4: clank.v1.EnrollResponse
+	(*SystemInfo)(nil),             // 5: clank.v1.SystemInfo
+	(*AgentMessage)(nil),           // 6: clank.v1.AgentMessage
+	(*UpdateResult)(nil),           // 7: clank.v1.UpdateResult
+	(*Heartbeat)(nil),              // 8: clank.v1.Heartbeat
+	(*ContainerStatus)(nil),        // 9: clank.v1.ContainerStatus
+	(*DeployProgress)(nil),         // 10: clank.v1.DeployProgress
+	(*ContainerIntrospection)(nil), // 11: clank.v1.ContainerIntrospection
+	(*DiscoveredPort)(nil),         // 12: clank.v1.DiscoveredPort
+	(*PushImageResult)(nil),        // 13: clank.v1.PushImageResult
+	(*CommandResult)(nil),          // 14: clank.v1.CommandResult
+	(*ControlMessage)(nil),         // 15: clank.v1.ControlMessage
+	(*UpdateCommand)(nil),          // 16: clank.v1.UpdateCommand
+	(*TunnelConfig)(nil),           // 17: clank.v1.TunnelConfig
+	(*DeployCommand)(nil),          // 18: clank.v1.DeployCommand
+	(*VolumeMount)(nil),            // 19: clank.v1.VolumeMount
+	(*HealthCheckConfig)(nil),      // 20: clank.v1.HealthCheckConfig
+	(*ResourceConfig)(nil),         // 21: clank.v1.ResourceConfig
+	(*ContainerCommand)(nil),       // 22: clank.v1.ContainerCommand
+	(*SecretDelivery)(nil),         // 23: clank.v1.SecretDelivery
+	(*CertRotation)(nil),           // 24: clank.v1.CertRotation
+	(*Ping)(nil),                   // 25: clank.v1.Ping
+	(*LogEntry)(nil),               // 26: clank.v1.LogEntry
+	(*LogAck)(nil),                 // 27: clank.v1.LogAck
+	(*MetricBatch)(nil),            // 28: clank.v1.MetricBatch
+	(*Metric)(nil),                 // 29: clank.v1.Metric
+	(*MetricAck)(nil),              // 30: clank.v1.MetricAck
+	(*EndpointInfo)(nil),           // 31: clank.v1.EndpointInfo
+	(*EndpointCommand)(nil),        // 32: clank.v1.EndpointCommand
+	(*EndpointStatus)(nil),         // 33: clank.v1.EndpointStatus
+	(*MaintenanceCommand)(nil),     // 34: clank.v1.MaintenanceCommand
+	(*BackupCommand)(nil),          // 35: clank.v1.BackupCommand
+	(*PushImageCommand)(nil),       // 36: clank.v1.PushImageCommand
+	(*BackupResult)(nil),           // 37: clank.v1.BackupResult
+	nil,                            // 38: clank.v1.DeployCommand.EnvVarsEntry
+	nil,                            // 39: clank.v1.SecretDelivery.EnvVarsEntry
+	nil,                            // 40: clank.v1.Metric.LabelsEntry
+	nil,                            // 41: clank.v1.EndpointCommand.ProviderConfigEntry
+	nil,                            // 42: clank.v1.EndpointStatus.DiagnosticsEntry
+	nil,                            // 43: clank.v1.BackupCommand.EnvVarsEntry
 }
 var file_clank_v1_agent_proto_depIdxs = []int32{
-	4,  // 0: clank.v1.EnrollRequest.system_info:type_name -> clank.v1.SystemInfo
-	7,  // 1: clank.v1.AgentMessage.heartbeat:type_name -> clank.v1.Heartbeat
-	9,  // 2: clank.v1.AgentMessage.deploy_progress:type_name -> clank.v1.DeployProgress
-	13, // 3: clank.v1.AgentMessage.command_result:type_name -> clank.v1.CommandResult
-	32, // 4: clank.v1.AgentMessage.endpoint_status:type_name -> clank.v1.EndpointStatus
-	6,  // 5: clank.v1.AgentMessage.update_result:type_name -> clank.v1.UpdateResult
-	35, // 6: clank.v1.AgentMessage.backup_result:type_name -> clank.v1.BackupResult
-	12, // 7: clank.v1.AgentMessage.push_image_result:type_name -> clank.v1.PushImageResult
-	4,  // 8: clank.v1.Heartbeat.system_info:type_name -> clank.v1.SystemInfo
-	8,  // 9: clank.v1.Heartbeat.containers:type_name -> clank.v1.ContainerStatus
-	10, // 10: clank.v1.DeployProgress.introspection:type_name -> clank.v1.ContainerIntrospection
-	11, // 11: clank.v1.ContainerIntrospection.discovered_ports:type_name -> clank.v1.DiscoveredPort
-	17, // 12: clank.v1.ControlMessage.deploy:type_name -> clank.v1.DeployCommand
-	22, // 13: clank.v1.ControlMessage.secret:type_name -> clank.v1.SecretDelivery
-	23, // 14: clank.v1.ControlMessage.cert_rotation:type_name -> clank.v1.CertRotation
-	24, // 15: clank.v1.ControlMessage.ping:type_name -> clank.v1.Ping
-	21, // 16: clank.v1.ControlMessage.container_cmd:type_name -> clank.v1.ContainerCommand
-	16, // 17: clank.v1.ControlMessage.tunnel_config:type_name -> clank.v1.TunnelConfig
-	15, // 18: clank.v1.ControlMessage.update:type_name -> clank.v1.UpdateCommand
-	31, // 19: clank.v1.ControlMessage.endpoint_cmd:type_name -> clank.v1.EndpointCommand
-	33, // 20: clank.v1.ControlMessage.backup_cmd:type_name -> clank.v1.BackupCommand
-	34, // 21: clank.v1.ControlMessage.push_image:type_name -> clank.v1.PushImageCommand
-	36, // 22: clank.v1.DeployCommand.env_vars:type_name -> clank.v1.DeployCommand.EnvVarsEntry
-	19, // 23: clank.v1.DeployCommand.health_config:type_name -> clank.v1.HealthCheckConfig
-	20, // 24: clank.v1.DeployCommand.resource_config:type_name -> clank.v1.ResourceConfig
-	30, // 25: clank.v1.DeployCommand.active_endpoints:type_name -> clank.v1.EndpointInfo
-	18, // 26: clank.v1.DeployCommand.volume_mounts:type_name -> clank.v1.VolumeMount
-	0,  // 27: clank.v1.ContainerCommand.action:type_name -> clank.v1.ContainerCommand.Action
-	37, // 28: clank.v1.SecretDelivery.env_vars:type_name -> clank.v1.SecretDelivery.EnvVarsEntry
-	28, // 29: clank.v1.MetricBatch.metrics:type_name -> clank.v1.Metric
-	38, // 30: clank.v1.Metric.labels:type_name -> clank.v1.Metric.LabelsEntry
-	1,  // 31: clank.v1.EndpointCommand.action:type_name -> clank.v1.EndpointCommand.Action
-	39, // 32: clank.v1.EndpointCommand.provider_config:type_name -> clank.v1.EndpointCommand.ProviderConfigEntry
-	40, // 33: clank.v1.EndpointStatus.diagnostics:type_name -> clank.v1.EndpointStatus.DiagnosticsEntry
-	41, // 34: clank.v1.BackupCommand.env_vars:type_name -> clank.v1.BackupCommand.EnvVarsEntry
-	18, // 35: clank.v1.BackupCommand.volume_mounts:type_name -> clank.v1.VolumeMount
-	2,  // 36: clank.v1.AgentEnrollmentService.Enroll:input_type -> clank.v1.EnrollRequest
-	5,  // 37: clank.v1.AgentControlService.Connect:input_type -> clank.v1.AgentMessage
-	25, // 38: clank.v1.AgentControlService.StreamLogs:input_type -> clank.v1.LogEntry
-	27, // 39: clank.v1.AgentControlService.StreamMetrics:input_type -> clank.v1.MetricBatch
-	3,  // 40: clank.v1.AgentEnrollmentService.Enroll:output_type -> clank.v1.EnrollResponse
-	14, // 41: clank.v1.AgentControlService.Connect:output_type -> clank.v1.ControlMessage
-	26, // 42: clank.v1.AgentControlService.StreamLogs:output_type -> clank.v1.LogAck
-	29, // 43: clank.v1.AgentControlService.StreamMetrics:output_type -> clank.v1.MetricAck
-	40, // [40:44] is the sub-list for method output_type
-	36, // [36:40] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	5,  // 0: clank.v1.EnrollRequest.system_info:type_name -> clank.v1.SystemInfo
+	8,  // 1: clank.v1.AgentMessage.heartbeat:type_name -> clank.v1.Heartbeat
+	10, // 2: clank.v1.AgentMessage.deploy_progress:type_name -> clank.v1.DeployProgress
+	14, // 3: clank.v1.AgentMessage.command_result:type_name -> clank.v1.CommandResult
+	33, // 4: clank.v1.AgentMessage.endpoint_status:type_name -> clank.v1.EndpointStatus
+	7,  // 5: clank.v1.AgentMessage.update_result:type_name -> clank.v1.UpdateResult
+	37, // 6: clank.v1.AgentMessage.backup_result:type_name -> clank.v1.BackupResult
+	13, // 7: clank.v1.AgentMessage.push_image_result:type_name -> clank.v1.PushImageResult
+	5,  // 8: clank.v1.Heartbeat.system_info:type_name -> clank.v1.SystemInfo
+	9,  // 9: clank.v1.Heartbeat.containers:type_name -> clank.v1.ContainerStatus
+	11, // 10: clank.v1.DeployProgress.introspection:type_name -> clank.v1.ContainerIntrospection
+	12, // 11: clank.v1.ContainerIntrospection.discovered_ports:type_name -> clank.v1.DiscoveredPort
+	18, // 12: clank.v1.ControlMessage.deploy:type_name -> clank.v1.DeployCommand
+	23, // 13: clank.v1.ControlMessage.secret:type_name -> clank.v1.SecretDelivery
+	24, // 14: clank.v1.ControlMessage.cert_rotation:type_name -> clank.v1.CertRotation
+	25, // 15: clank.v1.ControlMessage.ping:type_name -> clank.v1.Ping
+	22, // 16: clank.v1.ControlMessage.container_cmd:type_name -> clank.v1.ContainerCommand
+	17, // 17: clank.v1.ControlMessage.tunnel_config:type_name -> clank.v1.TunnelConfig
+	16, // 18: clank.v1.ControlMessage.update:type_name -> clank.v1.UpdateCommand
+	32, // 19: clank.v1.ControlMessage.endpoint_cmd:type_name -> clank.v1.EndpointCommand
+	35, // 20: clank.v1.ControlMessage.backup_cmd:type_name -> clank.v1.BackupCommand
+	36, // 21: clank.v1.ControlMessage.push_image:type_name -> clank.v1.PushImageCommand
+	34, // 22: clank.v1.ControlMessage.maintenance_cmd:type_name -> clank.v1.MaintenanceCommand
+	38, // 23: clank.v1.DeployCommand.env_vars:type_name -> clank.v1.DeployCommand.EnvVarsEntry
+	20, // 24: clank.v1.DeployCommand.health_config:type_name -> clank.v1.HealthCheckConfig
+	21, // 25: clank.v1.DeployCommand.resource_config:type_name -> clank.v1.ResourceConfig
+	31, // 26: clank.v1.DeployCommand.active_endpoints:type_name -> clank.v1.EndpointInfo
+	19, // 27: clank.v1.DeployCommand.volume_mounts:type_name -> clank.v1.VolumeMount
+	0,  // 28: clank.v1.ContainerCommand.action:type_name -> clank.v1.ContainerCommand.Action
+	39, // 29: clank.v1.SecretDelivery.env_vars:type_name -> clank.v1.SecretDelivery.EnvVarsEntry
+	29, // 30: clank.v1.MetricBatch.metrics:type_name -> clank.v1.Metric
+	40, // 31: clank.v1.Metric.labels:type_name -> clank.v1.Metric.LabelsEntry
+	1,  // 32: clank.v1.EndpointCommand.action:type_name -> clank.v1.EndpointCommand.Action
+	41, // 33: clank.v1.EndpointCommand.provider_config:type_name -> clank.v1.EndpointCommand.ProviderConfigEntry
+	42, // 34: clank.v1.EndpointStatus.diagnostics:type_name -> clank.v1.EndpointStatus.DiagnosticsEntry
+	2,  // 35: clank.v1.MaintenanceCommand.action:type_name -> clank.v1.MaintenanceCommand.Action
+	43, // 36: clank.v1.BackupCommand.env_vars:type_name -> clank.v1.BackupCommand.EnvVarsEntry
+	19, // 37: clank.v1.BackupCommand.volume_mounts:type_name -> clank.v1.VolumeMount
+	3,  // 38: clank.v1.AgentEnrollmentService.Enroll:input_type -> clank.v1.EnrollRequest
+	6,  // 39: clank.v1.AgentControlService.Connect:input_type -> clank.v1.AgentMessage
+	26, // 40: clank.v1.AgentControlService.StreamLogs:input_type -> clank.v1.LogEntry
+	28, // 41: clank.v1.AgentControlService.StreamMetrics:input_type -> clank.v1.MetricBatch
+	4,  // 42: clank.v1.AgentEnrollmentService.Enroll:output_type -> clank.v1.EnrollResponse
+	15, // 43: clank.v1.AgentControlService.Connect:output_type -> clank.v1.ControlMessage
+	27, // 44: clank.v1.AgentControlService.StreamLogs:output_type -> clank.v1.LogAck
+	30, // 45: clank.v1.AgentControlService.StreamMetrics:output_type -> clank.v1.MetricAck
+	42, // [42:46] is the sub-list for method output_type
+	38, // [38:42] is the sub-list for method input_type
+	38, // [38:38] is the sub-list for extension type_name
+	38, // [38:38] is the sub-list for extension extendee
+	0,  // [0:38] is the sub-list for field type_name
 }
 
 func init() { file_clank_v1_agent_proto_init() }
@@ -3508,14 +3692,15 @@ func file_clank_v1_agent_proto_init() {
 		(*ControlMessage_EndpointCmd)(nil),
 		(*ControlMessage_BackupCmd)(nil),
 		(*ControlMessage_PushImage)(nil),
+		(*ControlMessage_MaintenanceCmd)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_clank_v1_agent_proto_rawDesc), len(file_clank_v1_agent_proto_rawDesc)),
-			NumEnums:      2,
-			NumMessages:   40,
+			NumEnums:      3,
+			NumMessages:   41,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

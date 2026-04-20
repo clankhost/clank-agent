@@ -47,6 +47,9 @@ type BackupHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.
 // PushImageHandler handles push-to-registry commands.
 type PushImageHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.PushImageCommand)
 
+// MaintenanceHandler handles maintenance commands.
+type MaintenanceHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.MaintenanceCommand)
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
 	OnDeploy           DeployHandler
@@ -56,6 +59,7 @@ type CommandHandlers struct {
 	OnEndpoint         EndpointHandler
 	OnBackup           BackupHandler
 	OnPushImage        PushImageHandler
+	OnMaintenance      MaintenanceHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -207,6 +211,19 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 						}
 					}()
 					handlers.OnPushImage(ctx, stream, p.PushImage)
+				}()
+			}
+
+		case *clankv1.ControlMessage_MaintenanceCmd:
+			log.Printf("Received maintenance command %s: %s", p.MaintenanceCmd.GetCommandId(), p.MaintenanceCmd.GetAction())
+			if handlers.OnMaintenance != nil {
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("PANIC in maintenance handler: %v", r)
+						}
+					}()
+					handlers.OnMaintenance(ctx, stream, p.MaintenanceCmd)
 				}()
 			}
 

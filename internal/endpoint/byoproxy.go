@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 )
 
 // BYOProxyProvider handles byo_proxy endpoints.
@@ -40,11 +41,27 @@ func (p *BYOProxyProvider) Disable(ctx context.Context, cfg ProviderConfig) (*Pr
 }
 
 func (p *BYOProxyProvider) Doctor(ctx context.Context, cfg ProviderConfig) (*ProviderStatus, error) {
-	// Cannot verify external proxy — opaque to us
+	diag := map[string]string{"note": "Cannot verify external proxy configuration"}
+	routeStatus, routeMessage, routeHTTP, routeErr := probeRoutedEndpoint(cfg.Hostname, cfg.PathPrefix, 5*time.Second)
+	if routeErr != nil {
+		diag["route_check"] = routeMessage
+	} else {
+		diag["route_check"] = fmt.Sprintf("%s (status %d)", routeStatus, routeHTTP)
+	}
+
+	status := "active"
+	message := fmt.Sprintf("BYO proxy endpoint configured for %s. Verify your proxy is forwarding to http://<server-ip>:80", cfg.Hostname)
+	if routeStatus != "healthy" {
+		status = "degraded"
+		message = fmt.Sprintf("Local route for %s is unhealthy behind the external proxy", cfg.Hostname)
+	}
+
 	return &ProviderStatus{
-		Status:      "active",
-		Message:     fmt.Sprintf("BYO proxy endpoint configured for %s. Verify your proxy is forwarding to http://<server-ip>:80", cfg.Hostname),
-		VerifiedBy:  "agent",
-		Diagnostics: map[string]string{"note": "Cannot verify external proxy configuration"},
+		Status:       status,
+		Message:      message,
+		VerifiedBy:   "agent",
+		RouteStatus:  routeStatus,
+		PublicStatus: "unknown",
+		Diagnostics:  diag,
 	}, nil
 }
