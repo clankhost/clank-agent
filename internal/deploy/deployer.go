@@ -49,6 +49,9 @@ var imageHandlers = []imageHandler{
 func matchesImageHandler(imageTag string) *imageHandler {
 	tag := strings.ToLower(imageTag)
 	for i := range imageHandlers {
+		if strings.Contains(tag, "/clank/templates/"+imageHandlers[i].name+":") {
+			return &imageHandlers[i]
+		}
 		for _, prefix := range imageHandlers[i].prefixes {
 			if strings.HasPrefix(tag, prefix) {
 				return &imageHandlers[i]
@@ -152,18 +155,18 @@ type EndpointInfo struct {
 
 // DeployOpts configures a deployment.
 type DeployOpts struct {
-	DeploymentID    string
-	ServiceSlug     string
-	ImageTag        string
-	Env             map[string]string
-	Port            int
-	Domains         []string
-	Endpoints       []EndpointInfo
-	HealthCheckPath string
-	HealthConfig    HealthConfig
-	CPULimit        float64
-	MemoryLimitMB   int
-	ProjectNetwork  string
+	DeploymentID     string
+	ServiceSlug      string
+	ImageTag         string
+	Env              map[string]string
+	Port             int
+	Domains          []string
+	Endpoints        []EndpointInfo
+	HealthCheckPath  string
+	HealthConfig     HealthConfig
+	CPULimit         float64
+	MemoryLimitMB    int
+	ProjectNetwork   string
 	LANIPs           []string             // Agent LAN IPs for sslip.io routing
 	Volumes          []docker.VolumeMount // Persistent volume mounts
 	ContainerCommand []string             // Docker CMD override from the API
@@ -400,16 +403,6 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		opts.Env = make(map[string]string)
 	}
 	injectEndpointEnvVars(opts.Env, opts.ImageTag, opts.Endpoints)
-
-	// OpenClaw: add Traefik middleware to inject trusted-proxy auth header.
-	// The gateway always runs with --auth trusted-proxy; without the
-	// X-Openclaw-User header it falls back to device identity which fails
-	// in browsers on plain HTTP and is unnecessary on HTTPS. Traefik
-	// terminates TLS and proxies internally, so it can inject the header
-	// regardless of whether the external connection uses HTTP or HTTPS.
-	if handler := matchesImageHandler(opts.ImageTag); handler != nil && handler.name == "openclaw" {
-		addOpenClawProxyAuthLabels(labels, opts.ServiceSlug)
-	}
 
 	// Image handlers can specify minimum resource requirements. Upgrade
 	// opts when the handler needs more than the API-supplied defaults.
@@ -1158,39 +1151,6 @@ func generateEndpointLabels(labels map[string]string, serviceSlug string, port i
 	}
 }
 
-// addOpenClawProxyAuthLabels adds a Traefik middleware that injects an
-// X-Openclaw-User header on every request. This makes the gateway treat the
-// connection as trusted-proxy-authenticated, bypassing device identity checks.
-// Applied to all OpenClaw deploys (HTTP and HTTPS) since the gateway always
-// runs with --auth trusted-proxy and Traefik can inject headers in both cases.
-func addOpenClawProxyAuthLabels(labels map[string]string, serviceSlug string) {
-	mwName := fmt.Sprintf("clank-%s-ocauth", serviceSlug)
-
-	// Define the middleware: inject identity header for trusted-proxy auth.
-	labels[fmt.Sprintf("traefik.http.middlewares.%s.headers.customrequestheaders.X-Openclaw-User", mwName)] = "operator"
-
-	// Append this middleware to every router already in the label set.
-	routerRuleKey := regexp.MustCompile(`^traefik\.http\.routers\.(.+)\.rule$`)
-
-	// Collect router names that exist (from .rule keys).
-	routers := map[string]bool{}
-	for k := range labels {
-		if m := routerRuleKey.FindStringSubmatch(k); m != nil {
-			routers[m[1]] = true
-		}
-	}
-
-	mwRef := mwName + "@docker"
-	for router := range routers {
-		key := fmt.Sprintf("traefik.http.routers.%s.middlewares", router)
-		if existing, ok := labels[key]; ok {
-			labels[key] = existing + "," + mwRef
-		} else {
-			labels[key] = mwRef
-		}
-	}
-}
-
 // injectEndpointEnvVars examines the image tag and active endpoints, then
 // auto-injects env vars (CLANK_BASE_PATH, CLANK_BASE_URL, image-specific config)
 // into the env map. User-set values are never overwritten.
@@ -1229,6 +1189,12 @@ func injectEndpointEnvVars(env map[string]string, imageTag string, endpoints []E
 					log.Printf("Auto-injected CLANK_BASE_URL=%s", resolvedURL)
 				}
 			}
+		}
+	}
+
+	if resolvedURL != "" {
+		for key, value := range env {
+			env[key] = strings.ReplaceAll(value, "{{CLANK_PUBLIC_URL}}", resolvedURL)
 		}
 	}
 
@@ -1272,11 +1238,9 @@ func injectWordPressEnvVars(env map[string]string, resolvedURL, pathPrefix strin
 // Without --bind lan the gateway binds to loopback only (unreachable from
 // outside the container in Docker bridge networking).
 //
-// All agent-deployed OpenClaw services sit behind Traefik which injects an
-// X-Openclaw-User header, so we always use --auth trusted-proxy regardless
-// of TLS. This avoids device-identity issues on plain HTTP and simplifies
-// the configuration. Both http:// and https:// origins are allowed so the
-// UI works whether or not Let's Encrypt has provisioned a cert yet.
+// The gateway uses token authentication and an explicit origin allowlist.
+// Both http:// and https:// origins are allowed so the UI works while a
+// certificate is being provisioned, without trusting arbitrary Host headers.
 func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string) {
 	if _, ok := env["OPENCLAW_GATEWAY_TOKEN"]; !ok {
 		env["OPENCLAW_GATEWAY_TOKEN"] = generateHexToken(16)
@@ -1314,13 +1278,13 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 		// path OpenClaw reads). Single-line JSON avoids heredoc/newline issues
 		// inside Docker sh -c.
 		configJSON := fmt.Sprintf(
-			`{"gateway":{"bind":"lan","trustedProxies":["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"],"auth":{"trustedProxy":{"userHeader":"X-Openclaw-User"}},"controlUi":{"allowedOrigins":%s,"dangerouslyAllowHostHeaderOriginFallback":true,"dangerouslyDisableDeviceAuth":true,"allowInsecureAuth":true}}}`,
+			`{"gateway":{"mode":"local","bind":"lan","trustedProxies":["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"],"auth":{"mode":"token"},"controlUi":{"allowedOrigins":%s}}}`,
 			originsJSON,
 		)
 
 		writeConfig := fmt.Sprintf(`mkdir -p ~/.openclaw && printf '%%s' '%s' > ~/.openclaw/openclaw.json`, configJSON)
 
-		env["CLANK_CONTAINER_CMD"] = writeConfig + " && exec node openclaw.mjs gateway --allow-unconfigured --auth trusted-proxy"
+		env["CLANK_CONTAINER_CMD"] = writeConfig + " && exec node dist/index.js gateway --allow-unconfigured --auth token"
 	}
 }
 
