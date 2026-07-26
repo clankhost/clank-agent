@@ -994,9 +994,11 @@ func checkHTTPHealth(url string, timeoutSec int) bool {
 
 func generateTraefikLabels(deploymentID, serviceSlug string, domains []string, port int, endpoints []EndpointInfo, lanIPs []string, isHTTP bool, healthCheckPath ...string) map[string]string {
 	labels := map[string]string{
-		"clank.managed":       "true",
-		"clank.service_slug":  serviceSlug,
-		"clank.deployment_id": deploymentID,
+		"clank.managed":           "true",
+		"clank.ownership_version": "1",
+		"clank.artifact_type":     "service_container",
+		"clank.service_slug":      serviceSlug,
+		"clank.deployment_id":     deploymentID,
 	}
 
 	if !isHTTP {

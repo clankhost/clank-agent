@@ -165,7 +165,7 @@ func (m *Manager) PushImage(ctx context.Context, img string, auth *RegistryAuth,
 
 // BuildImage builds a Docker image from a context directory.
 // cacheFrom optionally specifies images to use as layer cache sources.
-func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile string, cacheFrom []string, onLog func(string)) error {
+func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile string, cacheFrom []string, labels map[string]string, onLog func(string)) error {
 	onLog(fmt.Sprintf("Building image %s...", tag))
 
 	// Create a tar archive of the build context
@@ -180,6 +180,7 @@ func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile s
 		Dockerfile: dockerfile,
 		Remove:     true,
 		CacheFrom:  cacheFrom,
+		Labels:     labels,
 		// Limit build resources to prevent runaway builds from exhausting host
 		Memory:   2 * 1024 * 1024 * 1024, // 2 GB
 		CPUQuota: 200000,                 // 2 cores (100000 per core)

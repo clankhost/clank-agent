@@ -120,13 +120,14 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 		log.Printf("  [build] %s", msg)
 		logLine(msg)
 	}
-	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, cacheFrom, buildLog)
+	imageLabels := imageOwnershipLabels(opts.DeploymentID, opts.ServiceSlug)
+	err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, cacheFrom, imageLabels, buildLog)
 	if err != nil && len(cacheFrom) > 0 && !isTimeout(ctx) {
 		// Cache-related build failures (moby-dangling corruption, missing layers)
 		// should not be fatal — retry without cache.
 		logLine(fmt.Sprintf("Build with cache failed: %v", err))
 		logLine("Retrying build without cache...")
-		err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, nil, buildLog)
+		err = b.docker.BuildImage(ctx, cloneDir, imageTag, dockerfilePath, nil, imageLabels, buildLog)
 	}
 	if err != nil {
 		logLine(fmt.Sprintf("Build failed: %v", err))
@@ -142,6 +143,16 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 		ImageTag: imageTag,
 		GitSHA:   gitSHA,
 	}, nil
+}
+
+func imageOwnershipLabels(deploymentID, serviceSlug string) map[string]string {
+	return map[string]string{
+		"clank.managed":           "true",
+		"clank.ownership_version": "1",
+		"clank.artifact_type":     "service_image",
+		"clank.deployment_id":     deploymentID,
+		"clank.service_slug":      serviceSlug,
+	}
 }
 
 func isTimeout(ctx context.Context) bool {

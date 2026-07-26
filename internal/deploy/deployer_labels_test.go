@@ -262,6 +262,8 @@ func TestGenerateTraefikLabels_HTTPService(t *testing.T) {
 	assertLabel(t, labels, "clank.managed", "true")
 	assertLabel(t, labels, "clank.service_slug", "myapp")
 	assertLabel(t, labels, "clank.deployment_id", "deploy-123")
+	assertLabel(t, labels, "clank.ownership_version", "1")
+	assertLabel(t, labels, "clank.artifact_type", "service_container")
 	assertLabel(t, labels, "traefik.http.services.clank-myapp.loadbalancer.server.port", "8080")
 
 	// Legacy labels should exist
@@ -300,7 +302,6 @@ func TestGenerateTraefikLabels_WithEndpoints(t *testing.T) {
 		t.Error("expected endpoint-specific secure router")
 	}
 }
-
 
 // ── Traefik health check labels (blue-green deploy support) ─────────────
 
