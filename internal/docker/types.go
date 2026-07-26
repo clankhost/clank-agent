@@ -54,13 +54,59 @@ type CleanupSection struct {
 	ReclaimableBytes int64 `json:"reclaimable_bytes"`
 }
 
+// ArtifactOwnership contains only Clank-reserved labels. It is evidence for
+// inventory reconciliation, never sufficient authorization for deletion.
+type ArtifactOwnership struct {
+	Managed            bool   `json:"managed"`
+	ProspectivelyOwned bool   `json:"prospectively_owned"`
+	OwnershipVersion   string `json:"ownership_version,omitempty"`
+	ArtifactType       string `json:"artifact_type,omitempty"`
+	DeploymentID       string `json:"deployment_id,omitempty"`
+	ServiceID          string `json:"service_id,omitempty"`
+	ServiceSlug        string `json:"service_slug,omitempty"`
+	ProjectID          string `json:"project_id,omitempty"`
+}
+
+type ImageInventoryItem struct {
+	ID                      string            `json:"id"`
+	RepoTags                []string          `json:"repo_tags"`
+	RepoDigests             []string          `json:"repo_digests"`
+	SizeBytes               int64             `json:"size_bytes"`
+	CreatedUnix             int64             `json:"created_unix"`
+	ContainerIDs            []string          `json:"container_ids"`
+	InUseByRunningContainer bool              `json:"in_use_by_running_container"`
+	Ownership               ArtifactOwnership `json:"ownership"`
+}
+
+type ContainerInventoryItem struct {
+	ID          string            `json:"id"`
+	Names       []string          `json:"names"`
+	State       string            `json:"state"`
+	ImageID     string            `json:"image_id,omitempty"`
+	ImageRef    string            `json:"image_ref,omitempty"`
+	SizeRWBytes int64             `json:"size_rw_bytes"`
+	Ownership   ArtifactOwnership `json:"ownership"`
+}
+
+// DockerArtifactInventory is bounded for safe transport. Complete=false is a
+// hard planner stop: no artifact from a truncated observation may be deleted.
+type DockerArtifactInventory struct {
+	Version        int                      `json:"version"`
+	Complete       bool                     `json:"complete"`
+	ImageCount     int                      `json:"image_count"`
+	ContainerCount int                      `json:"container_count"`
+	Images         []ImageInventoryItem     `json:"images"`
+	Containers     []ContainerInventoryItem `json:"containers"`
+}
+
 // CleanupSummary reports safe Docker cleanup preview/apply results.
 type CleanupSummary struct {
-	ProtectedImageRefs   []string       `json:"protected_image_refs"`
-	StoppedContainers    CleanupSection `json:"stopped_containers"`
-	UnusedImages         CleanupSection `json:"unused_images"`
-	BuildCache           CleanupSection `json:"build_cache"`
-	ReclaimableBytes     int64          `json:"reclaimable_bytes"`
-	Applied              bool           `json:"applied"`
-	ReclaimedBytesActual int64          `json:"reclaimed_bytes_actual,omitempty"`
+	ProtectedImageRefs   []string                 `json:"protected_image_refs"`
+	StoppedContainers    CleanupSection           `json:"stopped_containers"`
+	UnusedImages         CleanupSection           `json:"unused_images"`
+	BuildCache           CleanupSection           `json:"build_cache"`
+	ReclaimableBytes     int64                    `json:"reclaimable_bytes"`
+	Applied              bool                     `json:"applied"`
+	ReclaimedBytesActual int64                    `json:"reclaimed_bytes_actual,omitempty"`
+	Inventory            *DockerArtifactInventory `json:"inventory,omitempty"`
 }

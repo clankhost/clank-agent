@@ -27,6 +27,11 @@ import (
 	"github.com/shirou/gopsutil/v4/disk"
 )
 
+const (
+	artifactInventoryVersion  = 1
+	artifactInventoryMaxItems = 2000
+)
+
 // Manager wraps the Docker Engine API.
 type Manager struct {
 	cli *client.Client
@@ -981,6 +986,114 @@ func (m *Manager) EstimateImageSize(ctx context.Context, imageRef, serviceSlug s
 	return best, nil
 }
 
+func ownershipFromLabels(labels map[string]string, imageArtifact bool) ArtifactOwnership {
+	ownership := ArtifactOwnership{
+		Managed:          labels["clank.managed"] == "true",
+		OwnershipVersion: labels["clank.ownership_version"],
+		ArtifactType:     labels["clank.artifact_type"],
+		DeploymentID:     labels["clank.deployment_id"],
+		ServiceID:        labels["clank.service_id"],
+		ServiceSlug:      labels["clank.service_slug"],
+		ProjectID:        labels["clank.project_id"],
+	}
+	validType := ownership.ArtifactType == "service_container"
+	if imageArtifact {
+		validType = ownership.ArtifactType == "service_image" ||
+			ownership.ArtifactType == "preview_image"
+	}
+	ownership.ProspectivelyOwned = ownership.Managed &&
+		ownership.OwnershipVersion == "1" &&
+		validType &&
+		ownership.DeploymentID != "" &&
+		ownership.ServiceSlug != ""
+	return ownership
+}
+
+func buildDockerArtifactInventory(du dockertypes.DiskUsage, maxItems int) *DockerArtifactInventory {
+	if maxItems < 0 {
+		maxItems = 0
+	}
+	containersByImage := make(map[string][]string)
+	runningImageIDs := make(map[string]struct{})
+	containers := make([]ContainerInventoryItem, 0, len(du.Containers))
+	for _, item := range du.Containers {
+		if item == nil || item.ID == "" {
+			continue
+		}
+		if item.ImageID != "" {
+			containersByImage[item.ImageID] = append(containersByImage[item.ImageID], item.ID)
+			if item.State == "running" {
+				runningImageIDs[item.ImageID] = struct{}{}
+			}
+		}
+		size := item.SizeRw
+		if size < 0 {
+			size = 0
+		}
+		names := append([]string(nil), item.Names...)
+		sort.Strings(names)
+		containers = append(containers, ContainerInventoryItem{
+			ID:          item.ID,
+			Names:       names,
+			State:       item.State,
+			ImageID:     item.ImageID,
+			ImageRef:    item.Image,
+			SizeRWBytes: size,
+			Ownership:   ownershipFromLabels(item.Labels, false),
+		})
+	}
+
+	images := make([]ImageInventoryItem, 0, len(du.Images))
+	for _, item := range du.Images {
+		if item == nil || item.ID == "" {
+			continue
+		}
+		size := item.Size
+		if size < 0 {
+			size = 0
+		}
+		created := item.Created
+		if created < 0 {
+			created = 0
+		}
+		tags := append([]string(nil), item.RepoTags...)
+		digests := append([]string(nil), item.RepoDigests...)
+		containerIDs := append([]string(nil), containersByImage[item.ID]...)
+		sort.Strings(tags)
+		sort.Strings(digests)
+		sort.Strings(containerIDs)
+		_, running := runningImageIDs[item.ID]
+		images = append(images, ImageInventoryItem{
+			ID:                      item.ID,
+			RepoTags:                tags,
+			RepoDigests:             digests,
+			SizeBytes:               size,
+			CreatedUnix:             created,
+			ContainerIDs:            containerIDs,
+			InUseByRunningContainer: running,
+			Ownership:               ownershipFromLabels(item.Labels, true),
+		})
+	}
+
+	sort.Slice(images, func(i, j int) bool { return images[i].ID < images[j].ID })
+	sort.Slice(containers, func(i, j int) bool { return containers[i].ID < containers[j].ID })
+	inventory := &DockerArtifactInventory{
+		Version:        artifactInventoryVersion,
+		Complete:       len(images) <= maxItems && len(containers) <= maxItems,
+		ImageCount:     len(images),
+		ContainerCount: len(containers),
+	}
+	if len(images) > maxItems {
+		images = images[:maxItems]
+	}
+	if len(containers) > maxItems {
+		containers = containers[:maxItems]
+	}
+	inventory.Images = images
+	inventory.Containers = containers
+	return inventory
+}
+
 func (m *Manager) computeCleanupPlan(ctx context.Context, protectedImageRefs []string) (*cleanupPlan, error) {
 	protected := make(map[string]struct{}, len(protectedImageRefs))
 	for _, ref := range protectedImageRefs {
@@ -1099,6 +1212,7 @@ func (m *Manager) computeCleanupPlan(ctx context.Context, protectedImageRefs []s
 				ReclaimableBytes: buildCacheBytes + danglingBytes,
 			},
 			ReclaimableBytes: stoppedBytes + unusedBytes + buildCacheBytes + danglingBytes,
+			Inventory:        buildDockerArtifactInventory(du, artifactInventoryMaxItems),
 		},
 		stoppedContainers: stoppedContainers,
 		unusedImages:      unusedImages,
