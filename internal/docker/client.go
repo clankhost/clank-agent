@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1115,47 +1114,13 @@ func (m *Manager) PreviewCleanup(ctx context.Context, protectedImageRefs []strin
 	return &summary, nil
 }
 
-// ApplyCleanup removes stopped containers, unused images, dangling images,
-// and build cache while preserving protected image refs and running images.
+// ApplyCleanup rejects the legacy daemon-wide executor. Destructive cleanup is
+// reintroduced only through an exact-target, ownership-aware command after the
+// shadow planner rollout has been validated.
 func (m *Manager) ApplyCleanup(ctx context.Context, protectedImageRefs []string) (*CleanupSummary, error) {
-	plan, err := m.computeCleanupPlan(ctx, protectedImageRefs)
-	if err != nil {
-		return nil, err
-	}
-
-	reclaimedActual := int64(0)
-	for _, containerRef := range plan.stoppedContainers {
-		if err := m.cli.ContainerRemove(ctx, containerRef.ID, container.RemoveOptions{Force: true}); err != nil {
-			log.Printf("Warning: failed to remove stopped container %s: %v", containerRef.ID, err)
-			continue
-		}
-		reclaimedActual += containerRef.Bytes
-	}
-
-	for _, imageRef := range plan.unusedImages {
-		if _, err := m.cli.ImageRemove(ctx, imageRef.ID, image.RemoveOptions{Force: false, PruneChildren: true}); err != nil {
-			log.Printf("Warning: failed to remove image %s: %v", imageRef.ID, err)
-			continue
-		}
-		reclaimedActual += imageRef.Bytes
-	}
-
-	if report, err := m.cli.ImagesPrune(ctx, filters.NewArgs(filters.Arg("dangling", "true"))); err != nil {
-		log.Printf("Warning: dangling image prune failed: %v", err)
-	} else {
-		reclaimedActual += int64(report.SpaceReclaimed)
-	}
-
-	if report, err := m.cli.BuildCachePrune(ctx, build.CachePruneOptions{}); err != nil {
-		log.Printf("Warning: build cache prune failed: %v", err)
-	} else if report != nil {
-		reclaimedActual += int64(report.SpaceReclaimed)
-	}
-
-	summary := *plan.summary
-	summary.Applied = true
-	summary.ReclaimedBytesActual = reclaimedActual
-	return &summary, nil
+	_ = ctx
+	_ = protectedImageRefs
+	return nil, fmt.Errorf("legacy broad Docker cleanup is disabled; preview only")
 }
 
 func sortedKeys(values map[string]struct{}) []string {
