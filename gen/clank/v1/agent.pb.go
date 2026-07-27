@@ -126,8 +126,9 @@ func (EndpointCommand_Action) EnumDescriptor() ([]byte, []int) {
 type MaintenanceCommand_Action int32
 
 const (
-	MaintenanceCommand_PREVIEW_DOCKER_CLEANUP MaintenanceCommand_Action = 0
-	MaintenanceCommand_APPLY_DOCKER_CLEANUP   MaintenanceCommand_Action = 1
+	MaintenanceCommand_PREVIEW_DOCKER_CLEANUP  MaintenanceCommand_Action = 0
+	MaintenanceCommand_APPLY_DOCKER_CLEANUP    MaintenanceCommand_Action = 1
+	MaintenanceCommand_CREATE_RETENTION_CANARY MaintenanceCommand_Action = 2
 )
 
 // Enum value maps for MaintenanceCommand_Action.
@@ -135,10 +136,12 @@ var (
 	MaintenanceCommand_Action_name = map[int32]string{
 		0: "PREVIEW_DOCKER_CLEANUP",
 		1: "APPLY_DOCKER_CLEANUP",
+		2: "CREATE_RETENTION_CANARY",
 	}
 	MaintenanceCommand_Action_value = map[string]int32{
-		"PREVIEW_DOCKER_CLEANUP": 0,
-		"APPLY_DOCKER_CLEANUP":   1,
+		"PREVIEW_DOCKER_CLEANUP":  0,
+		"APPLY_DOCKER_CLEANUP":    1,
+		"CREATE_RETENTION_CANARY": 2,
 	}
 )
 
@@ -2891,13 +2894,15 @@ func (x *EndpointStatus) GetPublicStatus() string {
 
 // Maintenance/cleanup commands for agent-backed servers.
 type MaintenanceCommand struct {
-	state                protoimpl.MessageState    `protogen:"open.v1"`
-	CommandId            string                    `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
-	Action               MaintenanceCommand_Action `protobuf:"varint,2,opt,name=action,proto3,enum=clank.v1.MaintenanceCommand_Action" json:"action,omitempty"`
-	KeepSuccessfulImages int32                     `protobuf:"varint,3,opt,name=keep_successful_images,json=keepSuccessfulImages,proto3" json:"keep_successful_images,omitempty"`
-	ProtectedImageRefs   []string                  `protobuf:"bytes,4,rep,name=protected_image_refs,json=protectedImageRefs,proto3" json:"protected_image_refs,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	state                   protoimpl.MessageState    `protogen:"open.v1"`
+	CommandId               string                    `protobuf:"bytes,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Action                  MaintenanceCommand_Action `protobuf:"varint,2,opt,name=action,proto3,enum=clank.v1.MaintenanceCommand_Action" json:"action,omitempty"`
+	KeepSuccessfulImages    int32                     `protobuf:"varint,3,opt,name=keep_successful_images,json=keepSuccessfulImages,proto3" json:"keep_successful_images,omitempty"`
+	ProtectedImageRefs      []string                  `protobuf:"bytes,4,rep,name=protected_image_refs,json=protectedImageRefs,proto3" json:"protected_image_refs,omitempty"`
+	RetentionCanaryId       string                    `protobuf:"bytes,5,opt,name=retention_canary_id,json=retentionCanaryId,proto3" json:"retention_canary_id,omitempty"`
+	RetentionCanaryImageRef string                    `protobuf:"bytes,6,opt,name=retention_canary_image_ref,json=retentionCanaryImageRef,proto3" json:"retention_canary_image_ref,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *MaintenanceCommand) Reset() {
@@ -2956,6 +2961,20 @@ func (x *MaintenanceCommand) GetProtectedImageRefs() []string {
 		return x.ProtectedImageRefs
 	}
 	return nil
+}
+
+func (x *MaintenanceCommand) GetRetentionCanaryId() string {
+	if x != nil {
+		return x.RetentionCanaryId
+	}
+	return ""
+}
+
+func (x *MaintenanceCommand) GetRetentionCanaryImageRef() string {
+	if x != nil {
+		return x.RetentionCanaryImageRef
+	}
+	return ""
 }
 
 // Instructs the agent to backup a service's data (control plane -> agent).
@@ -3502,16 +3521,19 @@ const file_clank_v1_agent_proto_rawDesc = "" +
 	"\rpublic_status\x18\t \x01(\tR\fpublicStatus\x1a>\n" +
 	"\x10DiagnosticsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x98\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa2\x03\n" +
 	"\x12MaintenanceCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12;\n" +
 	"\x06action\x18\x02 \x01(\x0e2#.clank.v1.MaintenanceCommand.ActionR\x06action\x124\n" +
 	"\x16keep_successful_images\x18\x03 \x01(\x05R\x14keepSuccessfulImages\x120\n" +
-	"\x14protected_image_refs\x18\x04 \x03(\tR\x12protectedImageRefs\">\n" +
+	"\x14protected_image_refs\x18\x04 \x03(\tR\x12protectedImageRefs\x12.\n" +
+	"\x13retention_canary_id\x18\x05 \x01(\tR\x11retentionCanaryId\x12;\n" +
+	"\x1aretention_canary_image_ref\x18\x06 \x01(\tR\x17retentionCanaryImageRef\"[\n" +
 	"\x06Action\x12\x1a\n" +
 	"\x16PREVIEW_DOCKER_CLEANUP\x10\x00\x12\x18\n" +
-	"\x14APPLY_DOCKER_CLEANUP\x10\x01\"\x81\x04\n" +
+	"\x14APPLY_DOCKER_CLEANUP\x10\x01\x12\x1b\n" +
+	"\x17CREATE_RETENTION_CANARY\x10\x02\"\x81\x04\n" +
 	"\rBackupCommand\x12\x1d\n" +
 	"\n" +
 	"command_id\x18\x01 \x01(\tR\tcommandId\x12\x1b\n" +

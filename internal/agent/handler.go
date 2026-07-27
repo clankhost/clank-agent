@@ -980,20 +980,26 @@ func (h *CommandHandler) HandleEndpoint(ctx context.Context, stream grpcclient.C
 	}
 }
 
-// HandleMaintenance previews or applies safe Docker cleanup.
+// HandleMaintenance processes bounded Docker maintenance commands.
 func (h *CommandHandler) HandleMaintenance(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.MaintenanceCommand) {
 	log.Printf("Handling maintenance command %s: %s", cmd.GetCommandId(), cmd.GetAction())
 
 	var (
-		summary *docker.CleanupSummary
-		err     error
+		result any
+		err    error
 	)
 
 	switch cmd.GetAction() {
 	case clankv1.MaintenanceCommand_PREVIEW_DOCKER_CLEANUP:
-		summary, err = h.docker.PreviewCleanup(ctx, cmd.GetProtectedImageRefs())
+		result, err = h.docker.PreviewCleanup(ctx, cmd.GetProtectedImageRefs())
 	case clankv1.MaintenanceCommand_APPLY_DOCKER_CLEANUP:
-		summary, err = h.docker.ApplyCleanup(ctx, cmd.GetProtectedImageRefs())
+		result, err = h.docker.ApplyCleanup(ctx, cmd.GetProtectedImageRefs())
+	case clankv1.MaintenanceCommand_CREATE_RETENTION_CANARY:
+		result, err = h.docker.CreateRetentionCanary(
+			ctx,
+			cmd.GetRetentionCanaryId(),
+			cmd.GetRetentionCanaryImageRef(),
+		)
 	default:
 		err = fmt.Errorf("unknown maintenance action: %v", cmd.GetAction())
 	}
@@ -1002,11 +1008,11 @@ func (h *CommandHandler) HandleMaintenance(ctx context.Context, stream grpcclien
 	output := ""
 	if err != nil {
 		output = err.Error()
-	} else if summary != nil {
-		payload, marshalErr := json.Marshal(summary)
+	} else if result != nil {
+		payload, marshalErr := json.Marshal(result)
 		if marshalErr != nil {
 			success = false
-			output = fmt.Sprintf("marshal cleanup result: %v", marshalErr)
+			output = fmt.Sprintf("marshal maintenance result: %v", marshalErr)
 		} else {
 			output = string(payload)
 		}
