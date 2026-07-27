@@ -86,6 +86,36 @@ func TestBuildDockerArtifactInventoryClassifiesProspectiveOwnership(t *testing.T
 	}
 }
 
+func TestBuildDockerArtifactInventoryReportsCanaryRegistrationID(t *testing.T) {
+	const canaryID = "6ba96be4-ab40-4d13-ac0b-b33aac0165ea"
+	du := dockertypes.DiskUsage{
+		Images: []*image.Summary{
+			{
+				ID: "sha256:canary",
+				RepoTags: []string{
+					"clank-retention-canary:" + canaryID,
+				},
+				Labels: map[string]string{
+					"clank.managed":             "true",
+					"clank.ownership_version":   "1",
+					"clank.artifact_type":       "retention_canary_image",
+					"clank.retention_canary_id": canaryID,
+					"private.secret":            "must-not-be-returned",
+				},
+			},
+		},
+	}
+
+	inventory := buildDockerArtifactInventory(du, 10)
+	ownership := inventory.Images[0].Ownership
+	if ownership.RetentionCanaryID != canaryID {
+		t.Fatalf("retention canary ID = %q", ownership.RetentionCanaryID)
+	}
+	if ownership.ProspectivelyOwned {
+		t.Fatal("canary labels must not self-assert ordinary image ownership")
+	}
+}
+
 func TestBuildDockerArtifactInventoryTruncationFailsClosed(t *testing.T) {
 	du := dockertypes.DiskUsage{
 		Images: []*image.Summary{

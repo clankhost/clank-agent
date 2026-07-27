@@ -65,6 +65,7 @@ type ArtifactOwnership struct {
 	ServiceID          string `json:"service_id,omitempty"`
 	ServiceSlug        string `json:"service_slug,omitempty"`
 	ProjectID          string `json:"project_id,omitempty"`
+	RetentionCanaryID  string `json:"retention_canary_id,omitempty"`
 }
 
 type ImageInventoryItem struct {

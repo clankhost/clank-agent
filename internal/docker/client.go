@@ -988,13 +988,14 @@ func (m *Manager) EstimateImageSize(ctx context.Context, imageRef, serviceSlug s
 
 func ownershipFromLabels(labels map[string]string, imageArtifact bool) ArtifactOwnership {
 	ownership := ArtifactOwnership{
-		Managed:          labels["clank.managed"] == "true",
-		OwnershipVersion: labels["clank.ownership_version"],
-		ArtifactType:     labels["clank.artifact_type"],
-		DeploymentID:     labels["clank.deployment_id"],
-		ServiceID:        labels["clank.service_id"],
-		ServiceSlug:      labels["clank.service_slug"],
-		ProjectID:        labels["clank.project_id"],
+		Managed:           labels["clank.managed"] == "true",
+		OwnershipVersion:  labels["clank.ownership_version"],
+		ArtifactType:      labels["clank.artifact_type"],
+		DeploymentID:      labels["clank.deployment_id"],
+		ServiceID:         labels["clank.service_id"],
+		ServiceSlug:       labels["clank.service_slug"],
+		ProjectID:         labels["clank.project_id"],
+		RetentionCanaryID: labels["clank.retention_canary_id"],
 	}
 	validType := ownership.ArtifactType == "service_container"
 	if imageArtifact {
