@@ -1030,7 +1030,7 @@ func buildDockerArtifactInventory(du dockertypes.DiskUsage, maxItems int) *Docke
 		if size < 0 {
 			size = 0
 		}
-		names := append([]string(nil), item.Names...)
+		names := append([]string{}, item.Names...)
 		sort.Strings(names)
 		containers = append(containers, ContainerInventoryItem{
 			ID:          item.ID,
@@ -1056,9 +1056,9 @@ func buildDockerArtifactInventory(du dockertypes.DiskUsage, maxItems int) *Docke
 		if created < 0 {
 			created = 0
 		}
-		tags := append([]string(nil), item.RepoTags...)
-		digests := append([]string(nil), item.RepoDigests...)
-		containerIDs := append([]string(nil), containersByImage[item.ID]...)
+		tags := append([]string{}, item.RepoTags...)
+		digests := append([]string{}, item.RepoDigests...)
+		containerIDs := append([]string{}, containersByImage[item.ID]...)
 		sort.Strings(tags)
 		sort.Strings(digests)
 		sort.Strings(containerIDs)

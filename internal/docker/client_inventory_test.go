@@ -105,4 +105,9 @@ func TestBuildDockerArtifactInventoryTruncationFailsClosed(t *testing.T) {
 	if inventory.Images[0].ID != "sha256:a" {
 		t.Fatalf("inventory not deterministic: %q", inventory.Images[0].ID)
 	}
+	if inventory.Images[0].RepoTags == nil ||
+		inventory.Images[0].RepoDigests == nil ||
+		inventory.Images[0].ContainerIDs == nil {
+		t.Fatalf("inventory list fields must encode as arrays, not null: %+v", inventory.Images[0])
+	}
 }
