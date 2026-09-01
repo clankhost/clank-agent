@@ -22,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 	goarchive "github.com/moby/go-archive"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -124,6 +125,18 @@ func (m *Manager) PullImage(ctx context.Context, img string, auth *RegistryAuth,
 
 	onLog(fmt.Sprintf("Image %s pulled", img))
 	return nil
+}
+
+// ImageExists reports whether imageRef is available in the local Docker image store.
+func (m *Manager) ImageExists(ctx context.Context, imageRef string) (bool, error) {
+	_, _, err := m.cli.ImageInspectWithRaw(ctx, imageRef)
+	if err == nil {
+		return true, nil
+	}
+	if errdefs.IsNotFound(err) {
+		return false, nil
+	}
+	return false, fmt.Errorf("inspecting image %s: %w", imageRef, err)
 }
 
 // TagImage creates a new tag for an existing image.

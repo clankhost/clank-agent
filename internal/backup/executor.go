@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"path/filepath"
 	"sort"
@@ -22,16 +23,89 @@ import (
 	"github.com/clankhost/clank-agent/internal/docker"
 )
 
-const backupVolumeName = "clank-backups"
+const (
+	backupVolumeName       = "clank-backups"
+	alpineHelperImage      = "alpine:3.20"
+	helperImagePullTimeout = 2 * time.Minute
+)
+
+type dockerManager interface {
+	ImageExists(context.Context, string) (bool, error)
+	PullImage(context.Context, string, *docker.RegistryAuth, func(string)) error
+	FindContainerByLabel(context.Context, string, string) (string, string, error)
+	ContainerExec(context.Context, string, []string) (int, string, error)
+	RunContainer(context.Context, docker.RunOpts) (string, error)
+	StopAndRemove(context.Context, string) error
+	WaitContainer(context.Context, string) (int64, error)
+	ContainerLogs(context.Context, string, bool, string) (io.ReadCloser, error)
+}
+
+type helperImageCoordinator struct {
+	lock chan struct{}
+}
+
+func newHelperImageCoordinator() *helperImageCoordinator {
+	lock := make(chan struct{}, 1)
+	lock <- struct{}{}
+	return &helperImageCoordinator{lock: lock}
+}
+
+var sharedHelperImageCoordinator = newHelperImageCoordinator()
 
 // Executor performs backup operations using the Docker API.
 type Executor struct {
-	docker *docker.Manager
+	docker             dockerManager
+	helperImage        *helperImageCoordinator
+	helperImageTimeout time.Duration
 }
 
 // NewExecutor creates a backup executor.
 func NewExecutor(dm *docker.Manager) *Executor {
-	return &Executor{docker: dm}
+	return newExecutor(dm, sharedHelperImageCoordinator, helperImagePullTimeout)
+}
+
+func newExecutor(dm dockerManager, coordinator *helperImageCoordinator, timeout time.Duration) *Executor {
+	return &Executor{
+		docker:             dm,
+		helperImage:        coordinator,
+		helperImageTimeout: timeout,
+	}
+}
+
+func (c *helperImageCoordinator) ensure(ctx context.Context, timeout time.Duration, dm dockerManager) error {
+	ensureCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := ensureCtx.Err(); err != nil {
+		return fmt.Errorf("waiting for image check: %w", err)
+	}
+
+	select {
+	case <-ensureCtx.Done():
+		return fmt.Errorf("waiting for image check: %w", ensureCtx.Err())
+	case <-c.lock:
+	}
+	defer func() { c.lock <- struct{}{} }()
+
+	exists, err := dm.ImageExists(ensureCtx, alpineHelperImage)
+	if err != nil {
+		return fmt.Errorf("checking local image: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
+	if err := dm.PullImage(ensureCtx, alpineHelperImage, nil, func(string) {}); err != nil {
+		return fmt.Errorf("pull failed: %w", err)
+	}
+	return nil
+}
+
+func (e *Executor) runAlpineHelper(ctx context.Context, opts docker.RunOpts) (string, error) {
+	if err := e.helperImage.ensure(ctx, e.helperImageTimeout, e.docker); err != nil {
+		return "", fmt.Errorf("ensuring backup helper image %s: %w", alpineHelperImage, err)
+	}
+	opts.Image = alpineHelperImage
+	return e.docker.RunContainer(ctx, opts)
 }
 
 // Execute runs the backup described by cmd and returns the result.
@@ -169,8 +243,7 @@ func (e *Executor) databaseBackup(ctx context.Context, cmd *clankv1.BackupComman
 	shellCmd := fmt.Sprintf("mkdir -p /backups/%s && cat > /backups/%s/%s", backupDir, backupDir, outFile)
 	helperName := fmt.Sprintf("clank-backup-write-%s", cmd.GetBackupId()[:8])
 
-	helperID, err := e.docker.RunContainer(ctx, docker.RunOpts{
-		Image:      "alpine:3.20",
+	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Command:    []string{"sh", "-c", shellCmd},
 		Entrypoint: []string{},
@@ -313,8 +386,7 @@ func (e *Executor) volumeBackup(ctx context.Context, cmd *clankv1.BackupCommand,
 	shellCmd := strings.Join(cmds, " && ")
 
 	helperName := fmt.Sprintf("clank-backup-vol-%s", cmd.GetBackupId()[:8])
-	helperID, err := e.docker.RunContainer(ctx, docker.RunOpts{
-		Image:      "alpine:3.20",
+	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
 		Command:    []string{shellCmd},
@@ -367,8 +439,7 @@ func (e *Executor) writeMetadata(ctx context.Context, cmd *clankv1.BackupCommand
 
 	// Write via echo in a helper container
 	writeCmd := fmt.Sprintf("echo '%s' > /backups/%s/metadata.json", string(metaJSON), backupDir)
-	helperID, err := e.docker.RunContainer(ctx, docker.RunOpts{
-		Image:      "alpine:3.20",
+	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
 		Command:    []string{writeCmd},
@@ -391,8 +462,7 @@ func (e *Executor) deleteBackup(ctx context.Context, cmd *clankv1.BackupCommand)
 	shellCmd := fmt.Sprintf("rm -rf /backups/%s", backupDir)
 
 	helperName := fmt.Sprintf("clank-backup-del-%s", cmd.GetBackupId()[:8])
-	helperID, err := e.docker.RunContainer(ctx, docker.RunOpts{
-		Image:      "alpine:3.20",
+	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
 		Command:    []string{shellCmd},
@@ -452,8 +522,7 @@ func (e *Executor) enforceRetention(ctx context.Context, cmd *clankv1.BackupComm
 // the backup volume mounted. Returns the command output.
 func (e *Executor) execInHelper(ctx context.Context, shellCmd string) (string, error) {
 	helperName := fmt.Sprintf("clank-backup-helper-%d", time.Now().UnixNano()%100000)
-	helperID, err := e.docker.RunContainer(ctx, docker.RunOpts{
-		Image:      "alpine:3.20",
+	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
 		Command:    []string{shellCmd},
