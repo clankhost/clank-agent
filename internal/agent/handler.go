@@ -42,6 +42,7 @@ type CommandHandler struct {
 	deployer       *deploy.Deployer
 	endpointMgr    *endpoint.Manager
 	cfg            *Config
+	cfgMu          *sync.RWMutex
 	cfgDir         string
 	currentVersion string
 	logCollector   *logs.Collector
@@ -70,7 +71,7 @@ type CommandHandler struct {
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
-func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgDir string, version string, lc *logs.Collector) *CommandHandler {
+func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer, cfg *Config, cfgMu *sync.RWMutex, cfgDir string, version string, lc *logs.Collector) *CommandHandler {
 	// Initialize endpoint providers
 	epMgr := endpoint.NewManager(
 		&endpoint.LANProvider{},
@@ -91,6 +92,7 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 		deployer:       d,
 		endpointMgr:    epMgr,
 		cfg:            cfg,
+		cfgMu:          cfgMu,
 		cfgDir:         cfgDir,
 		currentVersion: version,
 		logCollector:   lc,
@@ -224,7 +226,13 @@ func (h *CommandHandler) clearDeploymentSeen(deployID string) {
 func (h *CommandHandler) evaluateDeployDiskGuard(ctx context.Context, cmd *clankv1.DeployCommand) (map[string]any, error) {
 	usage, err := h.docker.GetDockerRootUsage(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("evaluating Docker root usage: %w", err)
+		log.Printf(
+			"Deploy disk preflight failed server_id=%s deployment_id=%s telemetry_source=agent_live error=%v",
+			h.cfg.ServerID,
+			cmd.GetDeploymentId(),
+			err,
+		)
+		return nil, fmt.Errorf("server storage telemetry unavailable")
 	}
 
 	estimatedBytes, err := h.docker.EstimateImageSize(ctx, cmd.GetImageTag(), cmd.GetServiceSlug())
@@ -239,6 +247,26 @@ func (h *CommandHandler) evaluateDeployDiskGuard(ctx context.Context, cmd *clank
 		preview = &docker.CleanupSummary{}
 	}
 
+	freeBytes := int64(usage.FreeBytes)
+	log.Printf(
+		"Deploy disk preflight server_id=%s deployment_id=%s telemetry_source=agent_live docker_root_dir=%q available_bytes=%d min_free_bytes=%d reserve_bytes=%d force=%t",
+		h.cfg.ServerID,
+		cmd.GetDeploymentId(),
+		usage.DockerRootDir,
+		freeBytes,
+		deployDiskGuardMinFreeBytes,
+		deployDiskGuardReserveBytes,
+		cmd.GetForce(),
+	)
+	return buildDeployDiskGuardResult(usage, estimatedBytes, preview, cmd.GetForce()), nil
+}
+
+func buildDeployDiskGuardResult(
+	usage *docker.DockerRootUsage,
+	estimatedBytes int64,
+	preview *docker.CleanupSummary,
+	force bool,
+) map[string]any {
 	freeBytes := int64(usage.FreeBytes)
 	reasons := make([]string, 0, 2)
 	if freeBytes < deployDiskGuardMinFreeBytes {
@@ -265,9 +293,10 @@ func (h *CommandHandler) evaluateDeployDiskGuard(ctx context.Context, cmd *clank
 	return map[string]any{
 		"failure_kind":      "preflight_blocked",
 		"check":             "docker_disk_guard",
-		"blocked":           wouldBlock && !cmd.GetForce(),
+		"blocked":           wouldBlock && !force,
 		"would_block":       wouldBlock,
-		"forced":            cmd.GetForce(),
+		"forced":            force,
+		"telemetry_source":  "agent_live",
 		"docker_root_dir":   usage.DockerRootDir,
 		"free_bytes":        freeBytes,
 		"total_bytes":       int64(usage.TotalBytes),
@@ -283,7 +312,7 @@ func (h *CommandHandler) evaluateDeployDiskGuard(ctx context.Context, cmd *clank
 			"Delete old unused images or stopped containers",
 			"Use --force only if you intentionally want to bypass the disk guard",
 		},
-	}, nil
+	}
 }
 
 func summarizeDiskGuard(details map[string]any) string {
@@ -1038,10 +1067,20 @@ func (h *CommandHandler) HandleTunnelConfig(ctx context.Context, cfg *clankv1.Tu
 	tunnelID := cfg.GetTunnelId()
 	log.Printf("Configuring tunnel %s", tunnelID)
 
-	// Persist to agent config so cloudflared auto-starts on restart
-	h.cfg.TunnelToken = token
-	h.cfg.TunnelID = tunnelID
-	if err := SaveConfig(h.cfgDir, h.cfg); err != nil {
+	// Persist to agent config so cloudflared auto-starts on restart. Credential
+	// rotation uses the same lock, preventing either update from clobbering the
+	// other's durable state.
+	h.cfgMu.Lock()
+	updated := *h.cfg
+	updated.TunnelToken = token
+	updated.TunnelID = tunnelID
+	err := SaveConfig(h.cfgDir, &updated)
+	if err == nil {
+		h.cfg.TunnelToken = token
+		h.cfg.TunnelID = tunnelID
+	}
+	h.cfgMu.Unlock()
+	if err != nil {
 		log.Printf("Warning: failed to save tunnel config: %v", err)
 	}
 

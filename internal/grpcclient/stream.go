@@ -2,6 +2,7 @@ package grpcclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -50,16 +51,23 @@ type PushImageHandler func(ctx context.Context, stream ConnectStream, cmd *clank
 // MaintenanceHandler handles maintenance commands.
 type MaintenanceHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.MaintenanceCommand)
 
+// CredentialRotationHandler returns true after credentials are activated and
+// the stream should reconnect using the new identity.
+type CredentialRotationHandler func(ctx context.Context, stream ConnectStream, rotation *clankv1.CredentialRotation) bool
+
+var ErrCredentialRotated = errors.New("credential rotation activated")
+
 // CommandHandlers groups all command handler functions.
 type CommandHandlers struct {
-	OnDeploy           DeployHandler
-	OnContainerCommand ContainerCommandHandler
-	OnTunnelConfig     TunnelConfigHandler
-	OnUpdate           UpdateHandler
-	OnEndpoint         EndpointHandler
-	OnBackup           BackupHandler
-	OnPushImage        PushImageHandler
-	OnMaintenance      MaintenanceHandler
+	OnDeploy             DeployHandler
+	OnContainerCommand   ContainerCommandHandler
+	OnTunnelConfig       TunnelConfigHandler
+	OnUpdate             UpdateHandler
+	OnEndpoint           EndpointHandler
+	OnBackup             BackupHandler
+	OnPushImage          PushImageHandler
+	OnMaintenance        MaintenanceHandler
+	OnCredentialRotation CredentialRotationHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -99,6 +107,7 @@ func SendHeartbeat(stream ConnectStream, info *sysinfo.Info, containers []sysinf
 					TailscaleIp:           info.TailscaleIP,
 					TailscaleHostname:     info.TailscaleHostname,
 					TailscaleCliAvailable: info.TailscaleCLIAvailable,
+					Capabilities:          []string{"credential_rotation_v1"},
 				},
 				Containers: protoContainers,
 			},
@@ -225,6 +234,11 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 					}()
 					handlers.OnMaintenance(ctx, stream, p.MaintenanceCmd)
 				}()
+			}
+
+		case *clankv1.ControlMessage_CredentialRotationV2:
+			if handlers.OnCredentialRotation != nil && handlers.OnCredentialRotation(ctx, stream, p.CredentialRotationV2) {
+				return ErrCredentialRotated
 			}
 
 		default:

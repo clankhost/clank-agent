@@ -2,18 +2,17 @@ package cmd
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
 	"github.com/clankhost/clank-agent/internal/agent"
+	"github.com/clankhost/clank-agent/internal/certs"
+	"github.com/clankhost/clank-agent/internal/credentials"
 	"github.com/clankhost/clank-agent/internal/docker"
 	"github.com/spf13/cobra"
 )
@@ -28,13 +27,17 @@ var statusJSON bool
 
 // statusInfo holds the collected status for display or JSON output.
 type statusInfo struct {
-	Version        string `json:"version"`
-	ServerID       string `json:"server_id"`
-	Endpoint       string `json:"grpc_endpoint"`
-	ConfigDir      string `json:"config_dir"`
-	CertExpiry     string `json:"cert_expiry,omitempty"`
-	SystemdState   string `json:"systemd_state,omitempty"`
-	ContainerCount int    `json:"managed_containers"`
+	Version          string `json:"version"`
+	ServerID         string `json:"server_id"`
+	Endpoint         string `json:"grpc_endpoint"`
+	ConfigDir        string `json:"config_dir"`
+	CertExpiry       string `json:"cert_expiry,omitempty"`
+	AuthMode         string `json:"auth_mode,omitempty"`
+	RenewalStatus    string `json:"renewal_status,omitempty"`
+	RenewalError     string `json:"renewal_error,omitempty"`
+	RenewalNextRetry string `json:"renewal_next_retry,omitempty"`
+	SystemdState     string `json:"systemd_state,omitempty"`
+	ContainerCount   int    `json:"managed_containers"`
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
@@ -48,6 +51,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		ConfigDir: configDir,
 	}
 
+	credentialUnhealthy := false
 	// Load config
 	cfg, err := agent.LoadConfig(configDir)
 	if err != nil {
@@ -56,10 +60,28 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		info.ServerID = cfg.ServerID
 		info.Endpoint = cfg.GRPCEndpoint
+		info.AuthMode = cfg.AuthMode
+		if info.AuthMode == "" {
+			info.AuthMode = "mtls"
+		}
+		info.RenewalStatus = cfg.RenewalStatus
+		info.RenewalError = cfg.RenewalLastError
+		if cfg.RenewalNextRetryUnix > 0 {
+			info.RenewalNextRetry = time.Unix(cfg.RenewalNextRetryUnix, 0).Format(time.RFC3339)
+		}
+		certDir := cfg.CertDir
+		if certDir == "" {
+			certDir = configDir
+		}
+		expiresAt, expiryErr := credentials.Expiry(cfg.AuthMode, cfg.AuthToken, certs.NewStore(certDir), cfg.CredentialExpiresUnix)
+		if expiryErr != nil {
+			info.CertExpiry = "unavailable"
+			credentialUnhealthy = true
+		} else {
+			info.CertExpiry = formatCredentialExpiry(expiresAt)
+			credentialUnhealthy = time.Until(expiresAt) <= 0 || (time.Until(expiresAt) <= credentials.RenewalWindow && cfg.RenewalStatus == "failed")
+		}
 	}
-
-	// Cert expiry
-	info.CertExpiry = getCertExpiry(configDir)
 
 	// Systemd state (Linux only)
 	info.SystemdState = getSystemdState()
@@ -70,7 +92,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	if statusJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(info)
+		if err := enc.Encode(info); err != nil {
+			return err
+		}
+		if credentialUnhealthy {
+			return fmt.Errorf("control credential requires attention")
+		}
+		return nil
 	}
 
 	// Pretty print
@@ -78,33 +106,31 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Server ID:       %s\n", info.ServerID)
 	fmt.Printf("  gRPC Endpoint:   %s\n", info.Endpoint)
 	fmt.Printf("  Config Dir:      %s\n", info.ConfigDir)
-	fmt.Printf("  Cert Expiry:     %s\n", info.CertExpiry)
+	fmt.Printf("  Auth Mode:       %s\n", info.AuthMode)
+	fmt.Printf("  Credential:      %s\n", info.CertExpiry)
+	fmt.Printf("  Renewal:         %s\n", info.RenewalStatus)
+	if info.RenewalError != "" {
+		fmt.Printf("  Renewal Error:   %s\n", info.RenewalError)
+	}
+	if info.RenewalNextRetry != "" {
+		fmt.Printf("  Next Retry:      %s\n", info.RenewalNextRetry)
+	}
 	if runtime.GOOS == "linux" {
 		fmt.Printf("  Systemd:         %s\n", info.SystemdState)
 	}
 	fmt.Printf("  Containers:      %d managed\n", info.ContainerCount)
+	if credentialUnhealthy {
+		return fmt.Errorf("control credential requires attention")
+	}
 	return nil
 }
 
-func getCertExpiry(configDir string) string {
-	certPath := filepath.Join(configDir, "client.crt")
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		return "no certificate"
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return "invalid certificate"
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "invalid certificate"
-	}
-	remaining := time.Until(cert.NotAfter)
+func formatCredentialExpiry(expiresAt time.Time) string {
+	remaining := time.Until(expiresAt)
 	if remaining <= 0 {
-		return fmt.Sprintf("EXPIRED (%s)", cert.NotAfter.Format("2006-01-02"))
+		return fmt.Sprintf("EXPIRED (%s)", expiresAt.Format("2006-01-02"))
 	}
-	return fmt.Sprintf("%s (%s remaining)", cert.NotAfter.Format("2006-01-02"), remaining.Round(24*time.Hour))
+	return fmt.Sprintf("%s (%s remaining)", expiresAt.Format("2006-01-02"), remaining.Round(24*time.Hour))
 }
 
 func getSystemdState() string {

@@ -1,9 +1,7 @@
 package doctor
 
 import (
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/clankhost/clank-agent/internal/certs"
+	"github.com/clankhost/clank-agent/internal/credentials"
 	"github.com/clankhost/clank-agent/internal/docker"
 	"github.com/shirou/gopsutil/v4/disk"
 )
@@ -197,44 +197,50 @@ func CheckConfigExists(configDir string) CheckResult {
 	return CheckResult{Status: OK, Message: fmt.Sprintf("config: %s", path)}
 }
 
-// CheckCertsValid verifies the client certificate exists and is not expired/expiring.
-func CheckCertsValid(configDir string) CheckResult {
-	certPath := filepath.Join(configDir, "client.crt")
-	data, err := os.ReadFile(certPath)
+// CheckCredentials validates the active credential for the configured auth
+// mode and reports renewal health before it can strand the agent.
+func CheckCredentials(configDir, authMode, authToken string, configuredExpiry int64, renewalStatus, renewalError string) CheckResult {
+	store := certs.NewStore(configDir)
+	expiresAt, err := credentials.Expiry(authMode, authToken, store, configuredExpiry)
 	if err != nil {
-		return CheckResult{
-			Status:  Error,
-			Message: "client certificate not found",
-			Fix:     "Run 'clank-agent enroll' to obtain certificates",
-		}
+		return CheckResult{Status: Error, Message: "control credential unavailable", Fix: "Run 'clank-agent enroll' to restore agent credentials"}
 	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return CheckResult{Status: Error, Message: "cannot parse client certificate PEM"}
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return CheckResult{Status: Error, Message: fmt.Sprintf("invalid certificate: %v", err)}
-	}
-	remaining := time.Until(cert.NotAfter)
+	remaining := time.Until(expiresAt)
 	if remaining <= 0 {
 		return CheckResult{
 			Status:  Error,
-			Message: fmt.Sprintf("certificate expired %s ago", (-remaining).Round(time.Hour)),
-			Fix:     "Re-enroll or request certificate rotation from the control plane",
+			Message: fmt.Sprintf("%s credential expired %s ago", normalizedMode(authMode), (-remaining).Round(time.Hour)),
+			Fix:     "Automatic recovery will use the renewal credential; re-enroll if recovery is unavailable",
 		}
 	}
-	if remaining < 7*24*time.Hour {
+	if remaining <= credentials.RenewalWindow && renewalStatus == "failed" {
+		if renewalError == "" {
+			renewalError = "unknown"
+		}
+		return CheckResult{
+			Status:  Error,
+			Message: fmt.Sprintf("%s credential expires in %s; automatic renewal unhealthy (%s)", normalizedMode(authMode), remaining.Round(time.Hour), renewalError),
+			Fix:     "Check agent connectivity and logs; re-enroll before expiry if renewal does not recover",
+		}
+	}
+	if remaining <= credentials.RenewalWindow {
 		return CheckResult{
 			Status:  Warn,
-			Message: fmt.Sprintf("certificate expires in %s", remaining.Round(time.Hour)),
-			Fix:     "Certificate will be rotated automatically, or re-enroll manually",
+			Message: fmt.Sprintf("%s credential expires in %s; renewal status: %s", normalizedMode(authMode), remaining.Round(time.Hour), renewalStatus),
+			Fix:     "The agent will rotate it automatically; investigate if status changes to failed",
 		}
 	}
 	return CheckResult{
 		Status:  OK,
-		Message: fmt.Sprintf("certificate valid until %s (%s remaining)", cert.NotAfter.Format("2006-01-02"), remaining.Round(24*time.Hour)),
+		Message: fmt.Sprintf("%s credential valid until %s (%s remaining); renewal status: %s", normalizedMode(authMode), expiresAt.Format("2006-01-02"), remaining.Round(24*time.Hour), renewalStatus),
 	}
+}
+
+func normalizedMode(mode string) string {
+	if mode == "token" {
+		return "JWT"
+	}
+	return "mTLS"
 }
 
 // CheckSystemdService verifies the clank-agent systemd service is active (Linux only).

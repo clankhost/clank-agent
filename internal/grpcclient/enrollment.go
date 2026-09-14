@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
@@ -44,7 +45,8 @@ func EnrollTunnel(endpoint, token string, info *sysinfo.Info) (*EnrollResponse, 
 	apiURL := fmt.Sprintf("https://%s/api/agent/enroll", host)
 
 	reqBody := restEnrollRequest{
-		Token: token,
+		Token:    token,
+		AuthMode: "token",
 		SystemInfo: restSystemInfo{
 			Hostname:      info.Hostname,
 			OS:            info.OS,
@@ -111,16 +113,20 @@ func EnrollTunnel(endpoint, token string, info *sysinfo.Info) (*EnrollResponse, 
 	}
 
 	return &EnrollResponse{
-		ServerId:         restResp.ServerID,
-		ClientCert:       clientCert,
-		ClientKey:        clientKey,
-		CaCert:           caCert,
-		GrpcEndpoint:     restResp.GRPCEndpoint,
-		AuthToken:        restResp.AuthToken,
-		TunnelEndpoint:   restResp.TunnelEndpoint,
-		RegistryUrl:      restResp.RegistryURL,
-		RegistryUsername: restResp.RegistryUsername,
-		RegistryPassword: restResp.RegistryPassword,
+		ServerId:              restResp.ServerID,
+		ClientCert:            clientCert,
+		ClientKey:             clientKey,
+		CaCert:                caCert,
+		GrpcEndpoint:          restResp.GRPCEndpoint,
+		AuthToken:             restResp.AuthToken,
+		TunnelEndpoint:        restResp.TunnelEndpoint,
+		RegistryUrl:           restResp.RegistryURL,
+		RegistryUsername:      restResp.RegistryUsername,
+		RegistryPassword:      restResp.RegistryPassword,
+		RenewalToken:          restResp.RenewalToken,
+		CredentialExpiresUnix: restResp.CredentialExpiresUnix,
+		AuthGeneration:        restResp.AuthGeneration,
+		RenewalEndpoint:       restResp.RenewalEndpoint,
 	}, nil
 }
 
@@ -138,20 +144,114 @@ type restSystemInfo struct {
 
 type restEnrollRequest struct {
 	Token      string         `json:"token"`
+	AuthMode   string         `json:"auth_mode"`
 	SystemInfo restSystemInfo `json:"system_info"`
 }
 
 type restEnrollResponse struct {
-	ServerID         string `json:"server_id"`
-	ClientCert       string `json:"client_cert"`
-	ClientKey        string `json:"client_key"`
-	CACert           string `json:"ca_cert"`
-	GRPCEndpoint     string `json:"grpc_endpoint"`
-	AuthToken        string `json:"auth_token"`
-	TunnelEndpoint   string `json:"tunnel_endpoint"`
-	RegistryURL      string `json:"registry_url"`
-	RegistryUsername string `json:"registry_username"`
-	RegistryPassword string `json:"registry_password"`
+	ServerID              string `json:"server_id"`
+	ClientCert            string `json:"client_cert"`
+	ClientKey             string `json:"client_key"`
+	CACert                string `json:"ca_cert"`
+	GRPCEndpoint          string `json:"grpc_endpoint"`
+	AuthToken             string `json:"auth_token"`
+	TunnelEndpoint        string `json:"tunnel_endpoint"`
+	RegistryURL           string `json:"registry_url"`
+	RegistryUsername      string `json:"registry_username"`
+	RegistryPassword      string `json:"registry_password"`
+	RenewalToken          string `json:"renewal_token"`
+	CredentialExpiresUnix int64  `json:"credential_expires_unix"`
+	AuthGeneration        int64  `json:"auth_generation"`
+	RenewalEndpoint       string `json:"renewal_endpoint"`
+}
+
+type restRenewRequest struct {
+	ServerID     string `json:"server_id"`
+	RenewalToken string `json:"renewal_token"`
+	RequestID    string `json:"request_id"`
+	CSRPem       string `json:"csr_pem"`
+	AuthMode     string `json:"auth_mode"`
+}
+
+type restRenewResponse struct {
+	RequestID             string `json:"request_id"`
+	ClientCert            string `json:"client_cert"`
+	CACert                string `json:"ca_cert"`
+	AuthToken             string `json:"auth_token"`
+	RenewalToken          string `json:"renewal_token"`
+	CredentialExpiresUnix int64  `json:"credential_expires_unix"`
+	AuthGeneration        int64  `json:"auth_generation"`
+}
+
+// RenewCredentials recovers an agent whose primary mTLS/JWT credential can no
+// longer open the authenticated stream. The renewal token is sent only over
+// HTTPS to the narrowly scoped renewal endpoint.
+func RenewCredentials(
+	ctx context.Context,
+	endpoint, serverID, renewalToken, requestID, authMode string,
+	csrPEM []byte,
+) (*clankv1.CredentialRotation, error) {
+	if endpoint == "" {
+		return nil, fmt.Errorf("credential renewal endpoint is not configured")
+	}
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil || parsedEndpoint.Scheme != "https" || parsedEndpoint.Host == "" {
+		return nil, fmt.Errorf("credential renewal endpoint must use HTTPS")
+	}
+	body, err := json.Marshal(restRenewRequest{
+		ServerID: serverID, RenewalToken: renewalToken, RequestID: requestID,
+		CSRPem: base64.StdEncoding.EncodeToString(csrPEM), AuthMode: authMode,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshaling renewal request: %w", err)
+	}
+	reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating renewal request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("credential renewal request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("reading credential renewal response: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		var errorResponse struct {
+			Detail string `json:"detail"`
+		}
+		if json.Unmarshal(responseBody, &errorResponse) == nil && errorResponse.Detail != "" {
+			return nil, fmt.Errorf("credential renewal rejected: %s", errorResponse.Detail)
+		}
+		return nil, fmt.Errorf("credential renewal rejected: HTTP %d", resp.StatusCode)
+	}
+	var decoded restRenewResponse
+	if err := json.Unmarshal(responseBody, &decoded); err != nil {
+		return nil, fmt.Errorf("parsing credential renewal response: %w", err)
+	}
+	certPEM, err := base64.StdEncoding.DecodeString(decoded.ClientCert)
+	if err != nil {
+		return nil, fmt.Errorf("decoding renewed client certificate: %w", err)
+	}
+	caPEM, err := base64.StdEncoding.DecodeString(decoded.CACert)
+	if err != nil {
+		return nil, fmt.Errorf("decoding renewed CA certificate: %w", err)
+	}
+	return &clankv1.CredentialRotation{
+		RequestId: decoded.RequestID, ClientCert: certPEM, CaCert: caPEM,
+		AuthToken: decoded.AuthToken, RenewalToken: decoded.RenewalToken,
+		ExpiresUnix: decoded.CredentialExpiresUnix, AuthGeneration: decoded.AuthGeneration,
+	}, nil
 }
 
 func callEnrollRPC(conn *grpc.ClientConn, token string, info *sysinfo.Info) (*EnrollResponse, error) {

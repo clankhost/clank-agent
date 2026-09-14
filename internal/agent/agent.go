@@ -2,11 +2,13 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/clankhost/clank-agent/internal/build"
@@ -32,6 +34,8 @@ const streamReconnectWait = 5 * time.Second
 // Agent manages the lifecycle of the gRPC connection and heartbeat loop.
 type Agent struct {
 	cfg          *Config
+	cfgMu        *sync.RWMutex
+	credentialMu sync.Mutex
 	cfgDir       string
 	agentVersion string
 	certStore    *certs.Store
@@ -61,10 +65,12 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 	d := deploy.NewDeployer(dockerMgr)
 	lc := logs.NewCollector(dockerMgr)
 	mc := metrics.NewCollector(dockerMgr, cfg.ServerID)
-	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgDir, agentVersion, lc)
+	cfgMu := &sync.RWMutex{}
+	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgMu, cfgDir, agentVersion, lc)
 
 	return &Agent{
 		cfg:          cfg,
+		cfgMu:        cfgMu,
 		cfgDir:       cfgDir,
 		agentVersion: agentVersion,
 		certStore:    store,
@@ -113,11 +119,38 @@ func (a *Agent) Run(ctx context.Context) error {
 	quiet := false // first connection always logs
 
 	for {
+		if err := a.recoverCredentials(ctx, false); err != nil {
+			log.Printf("[credentials] Automatic recovery pending: %v", err)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(wait):
+			}
+			if wait < reconnectMaxWait {
+				wait *= 2
+			}
+			continue
+		}
 		connStart := time.Now()
 		err := a.connectAndStream(ctx, quiet)
 		if ctx.Err() != nil {
 			// Graceful shutdown
 			return nil
+		}
+
+		if errors.Is(err, grpcclient.ErrCredentialRotated) {
+			wait = reconnectBaseWait
+			quiet = true
+			continue
+		}
+		if err != nil && isAuthenticationFailure(err) {
+			if recoverErr := a.recoverCredentials(ctx, true); recoverErr == nil {
+				wait = reconnectBaseWait
+				quiet = false
+				continue
+			} else {
+				log.Printf("[credentials] Authenticated channel unavailable and recovery failed: %v", recoverErr)
+			}
 		}
 
 		connDuration := time.Since(connStart)
@@ -175,6 +208,14 @@ func isExpectedDisconnect(err error) bool {
 		strings.Contains(msg, "RST_STREAM")
 }
 
+func isAuthenticationFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unauthenticated") || strings.Contains(msg, "permissiondenied") || strings.Contains(msg, "permission denied")
+}
+
 // connectAndStream establishes the bidi stream and runs the heartbeat loop.
 // When quiet is true, suppresses connection/heartbeat logs (used for expected
 // Cloudflare Tunnel reconnects that shouldn't alarm users).
@@ -182,19 +223,20 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	var conn *grpc.ClientConn
 	var err error
 
-	if a.cfg.AuthMode == "token" {
+	cfg := a.credentialSnapshot()
+	if cfg.AuthMode == "token" {
 		// Tunnel mode: standard TLS + JWT bearer token
-		conn, err = grpcclient.DialTunnelWithAuth(a.cfg.GRPCEndpoint, a.cfg.AuthToken)
+		conn, err = grpcclient.DialTunnelWithAuth(cfg.GRPCEndpoint, cfg.AuthToken)
 	} else {
 		// Direct mode: mTLS with client certificate
 		tlsCreds, credErr := a.certStore.TransportCredentials()
 		if credErr != nil {
 			return fmt.Errorf("loading TLS credentials: %w", credErr)
 		}
-		conn, err = grpcclient.Dial(a.cfg.GRPCEndpoint, tlsCreds)
+		conn, err = grpcclient.Dial(cfg.GRPCEndpoint, tlsCreds)
 	}
 	if err != nil {
-		return fmt.Errorf("dialing %s: %w", a.cfg.GRPCEndpoint, err)
+		return fmt.Errorf("dialing %s: %w", cfg.GRPCEndpoint, err)
 	}
 	defer conn.Close()
 
@@ -223,14 +265,15 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 
 	// Receive loop — listen for commands from control plane
 	handlers := grpcclient.CommandHandlers{
-		OnDeploy:           a.handler.HandleDeploy,
-		OnContainerCommand: a.handler.HandleContainerCommand,
-		OnTunnelConfig:     a.handler.HandleTunnelConfig,
-		OnUpdate:           a.handler.HandleUpdate,
-		OnEndpoint:         a.handler.HandleEndpoint,
-		OnBackup:           a.handler.HandleBackup,
-		OnPushImage:        a.handler.HandlePushImage,
-		OnMaintenance:      a.handler.HandleMaintenance,
+		OnDeploy:             a.handler.HandleDeploy,
+		OnContainerCommand:   a.handler.HandleContainerCommand,
+		OnTunnelConfig:       a.handler.HandleTunnelConfig,
+		OnUpdate:             a.handler.HandleUpdate,
+		OnEndpoint:           a.handler.HandleEndpoint,
+		OnBackup:             a.handler.HandleBackup,
+		OnPushImage:          a.handler.HandlePushImage,
+		OnMaintenance:        a.handler.HandleMaintenance,
+		OnCredentialRotation: a.handleCredentialRotation,
 	}
 	go func() {
 		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)
@@ -297,6 +340,9 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 	if !quiet {
 		log.Println("Sent initial heartbeat")
 	}
+	if err := a.maybeRequestCredentialRenewal(stream); err != nil {
+		return err
+	}
 
 	for {
 		select {
@@ -308,6 +354,9 @@ func (a *Agent) sendHeartbeats(ctx context.Context, stream grpcclient.ConnectStr
 				return fmt.Errorf("sending heartbeat: %w", err)
 			}
 			log.Println("Heartbeat sent")
+			if err := a.maybeRequestCredentialRenewal(stream); err != nil {
+				return err
+			}
 
 			// Drain any pending results from deploys that completed while
 			// the previous stream was down. This handles the race where a
@@ -368,15 +417,16 @@ func (a *Agent) verifyConnectivity(ctx context.Context) bool {
 	var conn *grpc.ClientConn
 	var err error
 
-	if a.cfg.AuthMode == "token" {
-		conn, err = grpcclient.DialTunnelWithAuth(a.cfg.GRPCEndpoint, a.cfg.AuthToken)
+	cfg := a.credentialSnapshot()
+	if cfg.AuthMode == "token" {
+		conn, err = grpcclient.DialTunnelWithAuth(cfg.GRPCEndpoint, cfg.AuthToken)
 	} else {
 		tlsCreds, credErr := a.certStore.TransportCredentials()
 		if credErr != nil {
 			log.Printf("[update] Failed to load TLS credentials: %v", credErr)
 			return false
 		}
-		conn, err = grpcclient.Dial(a.cfg.GRPCEndpoint, tlsCreds)
+		conn, err = grpcclient.Dial(cfg.GRPCEndpoint, tlsCreds)
 	}
 	if err != nil {
 		log.Printf("[update] Failed to dial control plane: %v", err)

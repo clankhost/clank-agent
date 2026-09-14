@@ -96,14 +96,19 @@ func runEnroll(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg := &agent.Config{
-		ServerID:         resp.ServerId,
-		GRPCEndpoint:     grpcEndpoint,
-		CertDir:          configDir,
-		AuthMode:         authMode,
-		AuthToken:        authToken,
-		RegistryURL:      resp.RegistryUrl,
-		RegistryUsername: resp.RegistryUsername,
-		RegistryPassword: resp.RegistryPassword,
+		ServerID:              resp.ServerId,
+		GRPCEndpoint:          grpcEndpoint,
+		CertDir:               configDir,
+		AuthMode:              authMode,
+		AuthToken:             authToken,
+		RenewalToken:          resp.RenewalToken,
+		RenewalEndpoint:       resp.RenewalEndpoint,
+		CredentialExpiresUnix: resp.CredentialExpiresUnix,
+		AuthGeneration:        resp.AuthGeneration,
+		RenewalStatus:         "healthy",
+		RegistryURL:           resp.RegistryUrl,
+		RegistryUsername:      resp.RegistryUsername,
+		RegistryPassword:      resp.RegistryPassword,
 	}
 	if err := agent.SaveConfig(configDir, cfg); err != nil {
 		return fmt.Errorf("saving config: %w", err)

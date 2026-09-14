@@ -41,7 +41,16 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	runner.Add("docker_group", doctor.CheckDockerGroup)
 	runner.Add("disk_space", doctor.CheckDiskSpace)
 	runner.Add("config", func() doctor.CheckResult { return doctor.CheckConfigExists(configDir) })
-	runner.Add("certificates", func() doctor.CheckResult { return doctor.CheckCertsValid(configDir) })
+	runner.Add("control_credentials", func() doctor.CheckResult {
+		if cfg == nil {
+			return doctor.CheckResult{Status: doctor.Error, Message: "agent is not enrolled"}
+		}
+		certDir := cfg.CertDir
+		if certDir == "" {
+			certDir = configDir
+		}
+		return doctor.CheckCredentials(certDir, cfg.AuthMode, cfg.AuthToken, cfg.CredentialExpiresUnix, cfg.RenewalStatus, cfg.RenewalLastError)
+	})
 	runner.Add("grpc", func() doctor.CheckResult { return doctor.CheckGRPCConnectivity(grpcEndpoint) })
 	runner.Add("systemd", doctor.CheckSystemdService)
 	runner.Add("tailscale", doctor.CheckTailscale)
@@ -51,12 +60,18 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	if doctorJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(results)
+		if err := enc.Encode(results); err != nil {
+			return err
+		}
+		if doctor.HasErrors(results) {
+			return fmt.Errorf("diagnostic checks failed")
+		}
+		return nil
 	}
 
 	if doctorQuiet {
 		if doctor.HasErrors(results) {
-			os.Exit(1)
+			return fmt.Errorf("diagnostic checks failed")
 		}
 		return nil
 	}
@@ -87,7 +102,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	if doctor.HasErrors(results) {
-		os.Exit(1)
+		return fmt.Errorf("diagnostic checks failed")
 	}
 	return nil
 }

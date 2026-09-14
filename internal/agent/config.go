@@ -11,13 +11,29 @@ import (
 
 // Config holds the agent's persistent configuration.
 type Config struct {
-	ServerID     string `yaml:"server_id"`
-	GRPCEndpoint string `yaml:"grpc_endpoint"`
-	CertDir      string `yaml:"cert_dir"`
-	AuthMode     string `yaml:"auth_mode,omitempty"`  // "mtls" (default) or "token"
-	AuthToken    string `yaml:"auth_token,omitempty"` // JWT for tunnel mode
-	TunnelToken  string `yaml:"tunnel_token,omitempty"`
-	TunnelID     string `yaml:"tunnel_id,omitempty"`
+	ServerID               string `yaml:"server_id"`
+	GRPCEndpoint           string `yaml:"grpc_endpoint"`
+	CertDir                string `yaml:"cert_dir"`
+	AuthMode               string `yaml:"auth_mode,omitempty"`  // "mtls" (default) or "token"
+	AuthToken              string `yaml:"auth_token,omitempty"` // JWT for tunnel mode
+	RenewalToken           string `yaml:"renewal_token,omitempty"`
+	RenewalEndpoint        string `yaml:"renewal_endpoint,omitempty"`
+	CredentialExpiresUnix  int64  `yaml:"credential_expires_unix,omitempty"`
+	AuthGeneration         int64  `yaml:"auth_generation,omitempty"`
+	RenewalStatus          string `yaml:"renewal_status,omitempty"`
+	RenewalAttempts        int    `yaml:"renewal_attempts,omitempty"`
+	RenewalLastError       string `yaml:"renewal_last_error,omitempty"`
+	RenewalLastSuccessUnix int64  `yaml:"renewal_last_success_unix,omitempty"`
+	RenewalNextRetryUnix   int64  `yaml:"renewal_next_retry_unix,omitempty"`
+	PendingRotationID      string `yaml:"pending_rotation_id,omitempty"`
+	PendingAuthToken       string `yaml:"pending_auth_token,omitempty"`
+	PendingRenewalToken    string `yaml:"pending_renewal_token,omitempty"`
+	PendingExpiresUnix     int64  `yaml:"pending_expires_unix,omitempty"`
+	PendingAuthGeneration  int64  `yaml:"pending_auth_generation,omitempty"`
+	PendingPreviousBundle  string `yaml:"pending_previous_bundle,omitempty"`
+	PendingHadPointer      bool   `yaml:"pending_had_pointer,omitempty"`
+	TunnelToken            string `yaml:"tunnel_token,omitempty"`
+	TunnelID               string `yaml:"tunnel_id,omitempty"`
 
 	// Registry credentials for pulling Clank-hosted images (ADR-006).
 	RegistryURL      string `yaml:"registry_url,omitempty"`
@@ -89,7 +105,8 @@ func LoadConfig(dir string) (*Config, error) {
 	return &cfg, nil
 }
 
-// SaveConfig writes the agent config to the given directory.
+// SaveConfig writes the complete config through a same-directory temporary
+// file, preventing a crash or full disk from leaving truncated credentials.
 func SaveConfig(dir string, cfg *Config) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -98,5 +115,41 @@ func SaveConfig(dir string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0600)
+	tmp, err := os.CreateTemp(dir, ".config-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	ok := false
+	defer func() {
+		_ = tmp.Close()
+		if !ok {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0600); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.Rename(tmpPath, path); err != nil {
+		// Windows cannot replace an existing file. Production agents run on
+		// Unix; this fallback keeps local CLI use and tests functional.
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return err
+		}
+		if retryErr := os.Rename(tmpPath, path); retryErr != nil {
+			return retryErr
+		}
+	}
+	ok = true
+	return nil
 }
