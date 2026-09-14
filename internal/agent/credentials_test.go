@@ -37,3 +37,21 @@ func TestSafeCodeCannotPersistSecretText(t *testing.T) {
 		t.Fatalf("unexpected safe code %q", got)
 	}
 }
+
+func TestCredentialRenewalDueBootstrapsLegacyAgent(t *testing.T) {
+	now := time.Now()
+	expires := now.Add(90 * 24 * time.Hour)
+
+	if !credentialRenewalDue(Config{}, expires, now) {
+		t.Fatal("legacy agent without a recovery token must renew immediately")
+	}
+	if credentialRenewalDue(Config{RenewalToken: "existing"}, expires, now) {
+		t.Fatal("agent with a recovery token must wait for the normal renewal window")
+	}
+	if !credentialRenewalDue(Config{RenewalToken: "existing"}, now.Add(7*24*time.Hour), now) {
+		t.Fatal("agent inside the renewal window must renew")
+	}
+	if !credentialRenewalDue(Config{RenewalToken: "existing", PendingRotationID: "rotation-existing"}, expires, now) {
+		t.Fatal("pending rotation must be resumed regardless of expiry")
+	}
+}

@@ -97,7 +97,7 @@ func (a *Agent) maybeRequestCredentialRenewal(stream grpcclient.ConnectStream) e
 		a.recordCredentialFailure("expiry_unavailable", false)
 		return nil
 	}
-	if cfg.PendingRotationID == "" && expires.Sub(now) > credentials.RenewalWindow {
+	if !credentialRenewalDue(cfg, expires, now) {
 		return nil
 	}
 	if cfg.RenewalNextRetryUnix > now.Unix() {
@@ -119,6 +119,14 @@ func (a *Agent) maybeRequestCredentialRenewal(stream grpcclient.ConnectStream) e
 		return fmt.Errorf("sending credential renewal request: %w", err)
 	}
 	return nil
+}
+
+func credentialRenewalDue(cfg Config, expires, now time.Time) bool {
+	// Agents enrolled before renewable credentials were introduced have no
+	// recovery token. Bootstrap one immediately while their existing control
+	// channel is authenticated, rather than waiting until the normal renewal
+	// window and risking an unrecoverable offline expiry.
+	return cfg.PendingRotationID != "" || cfg.RenewalToken == "" || expires.Sub(now) <= credentials.RenewalWindow
 }
 
 func (a *Agent) handleCredentialRotation(
