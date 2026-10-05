@@ -45,6 +45,7 @@ type Agent struct {
 	handler      *CommandHandler
 	logCollector *logs.Collector
 	metCollector *metrics.Collector
+	streams      streamRouter
 }
 
 // New creates a new Agent from the given config.
@@ -240,10 +241,15 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	}
 	defer conn.Close()
 
-	stream, err := grpcclient.OpenConnectStream(ctx, conn)
+	raw, err := grpcclient.OpenConnectStream(ctx, conn)
 	if err != nil {
 		return fmt.Errorf("opening stream: %w", err)
 	}
+	// Heartbeats and draining stay on this connection's own stream so a
+	// failed heartbeat still ends it; command handlers get a routed stream
+	// whose sends follow the live connection across reconnects.
+	stream := a.streams.attach(raw)
+	defer a.streams.detach(stream)
 
 	if !quiet {
 		log.Println("Connected to control plane")
@@ -276,7 +282,7 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 		OnCredentialRotation: a.handleCredentialRotation,
 	}
 	go func() {
-		errCh <- grpcclient.ReceiveCommands(ctx, stream, handlers)
+		errCh <- grpcclient.ReceiveCommands(ctx, a.streams.routed(stream), handlers)
 	}()
 
 	// Start log and metrics streamers (per-connection, cancelled on disconnect)
