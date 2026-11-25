@@ -447,6 +447,9 @@ func TestDatabaseBackupNoDoubleDumpAndNoShellInjection(t *testing.T) {
 	if len(dumpHelper.Command) < 2 || dumpHelper.Command[1] != "--" {
 		t.Fatalf("expected positional args separator '--' in Command, got %v", dumpHelper.Command)
 	}
+	if !strings.Contains(dumpHelper.Command[0], "pg_dump --clean --if-exists") {
+		t.Fatalf("expected pg_dump --clean --if-exists in Command[0], got %q", dumpHelper.Command[0])
+	}
 }
 
 func TestExecInHelperDemuxesStdcopy(t *testing.T) {

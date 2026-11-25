@@ -310,7 +310,7 @@ func (e *Executor) runDumpViaHelper(ctx context.Context, cmd *clankv1.BackupComm
 			"PGPASSWORD": envOrDefault(envVars, "POSTGRES_PASSWORD", ""),
 		}
 		command = []string{
-			`mkdir -p -- "$1" && pg_dump -h "$2" -U "$3" -- "$4" > "$5"`,
+			`mkdir -p -- "$1" && pg_dump --clean --if-exists -h "$2" -U "$3" -- "$4" > "$5"`,
 			"--",
 			backupRoot, serviceSlug, user, db, outPath,
 		}

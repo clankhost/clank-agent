@@ -117,7 +117,7 @@ func (e *Executor) restoreDatabase(ctx context.Context, cmd *clankv1.BackupComma
 			"PGPASSWORD": envOrDefault(envVars, "POSTGRES_PASSWORD", ""),
 		}
 		command = []string{
-			`psql -h "$1" -U "$2" -d "$3" -v ON_ERROR_STOP=1 < "$4"`,
+			`psql -h "$1" -U "$2" -d "$3" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;" && psql -h "$1" -U "$2" -d "$3" -v ON_ERROR_STOP=1 < "$4"`,
 			"--",
 			serviceSlug, user, db, dumpPath,
 		}

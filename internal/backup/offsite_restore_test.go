@@ -245,7 +245,7 @@ func TestRestoreDatabasePostgresMySQLMongo(t *testing.T) {
 			wantImage:       "postgres:16-alpine",
 			wantEnvKey:      "PGPASSWORD",
 			wantEnvVal:      "pg'secret;echo",
-			wantCmdContains: `psql -h "$1" -U "$2" -d "$3" -v ON_ERROR_STOP=1 < "$4"`,
+			wantCmdContains: `psql -h "$1" -U "$2" -d "$3" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;" && psql -h "$1" -U "$2" -d "$3" -v ON_ERROR_STOP=1 < "$4"`,
 			wantArgs:        []string{"mydb", "pguser", "pgdb", "/backups/myproj/mydb/bkp-1/dump.sql"},
 		},
 		{
