@@ -5,8 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os/exec"
 	"regexp"
@@ -137,7 +139,19 @@ type ProgressFunc func(status, message, containerID, containerName string)
 // Deployer handles container deployment on the agent host.
 type Deployer struct {
 	docker *docker.Manager
+
+	// Traefik-ready cutover probe configuration (zero values use production defaults).
+	traefikEndpoint     string
+	traefikReadyTimeout time.Duration
+	traefikPollInterval time.Duration
+	traefikHTTPClient   *http.Client
 }
+
+const (
+	defaultTraefikEndpoint     = "http://127.0.0.1:80"
+	defaultTraefikReadyTimeout = 10 * time.Second
+	defaultTraefikPollInterval = 500 * time.Millisecond
+)
 
 // NewDeployer creates a Deployer with the given Docker manager.
 func NewDeployer(dm *docker.Manager) *Deployer {
@@ -655,7 +669,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// If health check path is explicitly set, run health checks
 	if hc.Path != "" {
-		result, err := d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress, opts.OnLog)
+		result, passedAttempt, err := d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, opts.OnLog)
 		if err != nil {
 			// Health check failed. In blue-green mode, old container is still
 			// serving traffic — runHTTPHealthChecks already stopped the new one.
@@ -664,10 +678,18 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 			}
 			return result, err
 		}
+		// Wait for Traefik to pick up the new container's Docker labels and
+		// settle routing before removing the old container or reporting active.
+		d.waitForTraefikReady(ctx, opts, hc.Path, opts.OnLog)
+
 		// Health check passed — clean up old container if blue-green
 		if useBlueGreen && oldID != "" && oldID != containerID {
 			// Brief delay for Traefik to fully route to new container
-			time.Sleep(2 * time.Second)
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
 			log.Printf("Blue-green success: stopping old container %s (%s)", oldName, oldID[:12])
 			if stopErr := d.docker.StopAndRemove(ctx, oldID); stopErr != nil {
 				log.Printf("Warning: failed to remove old container: %v", stopErr)
@@ -676,6 +698,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		} else if useBlueGreen && oldID == containerID {
 			log.Printf("Blue-green: adopted existing container %s — skipping cleanup", oldName)
 		}
+		onProgress("active", fmt.Sprintf("Health check passed (attempt %d)", passedAttempt), containerID[:12], containerName)
 		return result, nil
 	}
 
@@ -686,9 +709,16 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		if autoPath != "" {
 			log.Printf("Auto-detected health path: %s", autoPath)
 			hc.Path = autoPath
-			return d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, onProgress, opts.OnLog)
+			result, passedAttempt, err := d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, opts.OnLog)
+			if err != nil {
+				return result, err
+			}
+			d.waitForTraefikReady(ctx, opts, autoPath, opts.OnLog)
+			onProgress("active", fmt.Sprintf("Health check passed (attempt %d)", passedAttempt), containerID[:12], containerName)
+			return result, nil
 		}
-		// HTTP but no health path found — consider alive if port responds
+		// HTTP but no health path found — wait briefly for Traefik then mark active
+		d.waitForTraefikReady(ctx, opts, "/", opts.OnLog)
 		log.Println("HTTP port responding, no health path found — marking active")
 		onProgress("active", "Deployment active (HTTP port responding)", containerID[:12], containerName)
 		return result, nil
@@ -785,6 +815,13 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 			proto := docker.ProbePort(ctx, ip, effectivePort)
 			if proto == "http" || (proto == "tcp" && injectedHealthcheck == nil) {
 				log.Printf("Port %d now responding (%s) on attempt %d", effectivePort, proto, attempt)
+				if proto == "http" {
+					probePath := hc.Path
+					if probePath == "" {
+						probePath = "/"
+					}
+					d.waitForTraefikReady(ctx, opts, probePath, opts.OnLog)
+				}
 				onProgress("active", fmt.Sprintf("Deployment active (%s port responding, attempt %d)", proto, attempt), containerID[:12], containerName)
 				return result, nil
 			}
@@ -875,15 +912,15 @@ func (d *Deployer) waitForDockerHealthy(ctx context.Context, containerID string,
 }
 
 // runHTTPHealthChecks performs traditional HTTP health checks and handles failure cleanup.
+// Returns the DeployResult, the 1-based attempt number that succeeded, and any error.
 func (d *Deployer) runHTTPHealthChecks(
 	ctx context.Context,
 	result *DeployResult,
 	containerID, containerName, ip string,
 	port int,
 	hc HealthConfig,
-	onProgress ProgressFunc,
 	onLog func(string),
-) (*DeployResult, error) {
+) (*DeployResult, int, error) {
 	if hc.Retries <= 0 {
 		hc.Retries = 3
 	}
@@ -899,7 +936,7 @@ func (d *Deployer) runHTTPHealthChecks(
 		log.Printf("Waiting %ds startup grace...", hc.StartupGraceSeconds)
 		select {
 		case <-ctx.Done():
-			return result, ctx.Err()
+			return result, 0, ctx.Err()
 		case <-time.After(time.Duration(hc.StartupGraceSeconds) * time.Second):
 		}
 	}
@@ -916,8 +953,7 @@ func (d *Deployer) runHTTPHealthChecks(
 			if onLog != nil {
 				onLog(fmt.Sprintf("Health check passed (attempt %d)", attempt))
 			}
-			onProgress("active", fmt.Sprintf("Health check passed (attempt %d)", attempt), containerID[:12], containerName)
-			return result, nil
+			return result, attempt, nil
 		}
 
 		log.Printf("Health check failed (attempt %d/%d)", attempt, hc.Retries)
@@ -927,7 +963,7 @@ func (d *Deployer) runHTTPHealthChecks(
 		if attempt < hc.Retries {
 			select {
 			case <-ctx.Done():
-				return result, ctx.Err()
+				return result, 0, ctx.Err()
 			case <-time.After(time.Duration(hc.IntervalSeconds) * time.Second):
 			}
 		}
@@ -947,7 +983,159 @@ func (d *Deployer) runHTTPHealthChecks(
 		log.Printf("Warning: failed to remove unhealthy container: %v", stopErr)
 	}
 
-	return result, fmt.Errorf("health checks failed after %d attempts", hc.Retries)
+	return result, 0, fmt.Errorf("health checks failed after %d attempts", hc.Retries)
+}
+
+// selectTraefikProbeTarget chooses the primary hostname and request path to
+// probe through local Traefik (:80). Returns ("", "") if no public hostname or
+// domain is configured.
+func selectTraefikProbeTarget(opts DeployOpts, healthPath string) (string, string) {
+	if healthPath == "" {
+		healthPath = "/"
+	} else if !strings.HasPrefix(healthPath, "/") {
+		healthPath = "/" + healthPath
+	}
+
+	// Prefer endpoints whose :80 router proxies directly to the backend container
+	// (so a 200-399 proves end-to-end Traefik → container routing).
+	var fallbackHost string
+	for _, ep := range opts.Endpoints {
+		h := strings.TrimSpace(ep.Hostname)
+		if h == "" || !safeDomainRe.MatchString(h) || len(h) > 253 {
+			continue
+		}
+		switch ep.Provider {
+		case "public_tunnel_cloudflare", "lan_only", "byo_proxy":
+			return h, healthPath
+		case "private_tailscale_https":
+			path := healthPath
+			if ep.PathPrefix != "" {
+				path = strings.TrimSuffix(ep.PathPrefix, "/") + healthPath
+			}
+			return h, path
+		default:
+			if fallbackHost == "" {
+				fallbackHost = h
+			}
+		}
+	}
+	if fallbackHost != "" {
+		return fallbackHost, healthPath
+	}
+
+	for _, dom := range opts.Domains {
+		h := strings.TrimSpace(dom)
+		if h != "" && safeDomainRe.MatchString(h) && len(h) <= 253 {
+			return h, healthPath
+		}
+	}
+
+	return "", ""
+}
+
+// waitForTraefikReady probes the local Traefik HTTP endpoint with the service's
+// primary Host header so Traefik finishes picking up Docker labels before we
+// stop the old container or report "active". Always falls back gracefully if no
+// hostname is configured, Traefik isn't listening on port 80, or the bounded
+// timeout elapses.
+func (d *Deployer) waitForTraefikReady(ctx context.Context, opts DeployOpts, healthPath string, onLog func(string)) {
+	host, path := selectTraefikProbeTarget(opts, healthPath)
+	if host == "" {
+		return
+	}
+
+	endpoint := d.traefikEndpoint
+	if endpoint == "" {
+		endpoint = defaultTraefikEndpoint
+	}
+	timeout := d.traefikReadyTimeout
+	if timeout <= 0 {
+		timeout = defaultTraefikReadyTimeout
+	}
+	pollInterval := d.traefikPollInterval
+	if pollInterval <= 0 {
+		pollInterval = defaultTraefikPollInterval
+	}
+	client := d.traefikHTTPClient
+	if client == nil {
+		client = &http.Client{
+			Timeout: 2 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+	}
+
+	probeURL := strings.TrimRight(endpoint, "/") + path
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	log.Printf("Waiting for Traefik route readiness: %s (Host: %s, timeout: %s)", probeURL, host, timeout)
+	if onLog != nil {
+		onLog(fmt.Sprintf("Waiting for Traefik route to settle for %s%s...", host, path))
+	}
+
+	consecutiveDialErrors := 0
+	lastStatus := 0
+	var lastErr error
+
+	for attempt := 1; ; attempt++ {
+		req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, probeURL, nil)
+		if err != nil {
+			log.Printf("Traefik probe request creation failed: %v — skipping", err)
+			return
+		}
+		req.Host = host
+
+		resp, err := client.Do(req)
+		if err == nil {
+			consecutiveDialErrors = 0
+			lastStatus = resp.StatusCode
+			resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+				log.Printf("Traefik route ready for %s%s (HTTP %d, attempt %d)", host, path, resp.StatusCode, attempt)
+				if onLog != nil {
+					onLog(fmt.Sprintf("Traefik route ready for %s%s (HTTP %d)", host, path, resp.StatusCode))
+				}
+				return
+			}
+		} else {
+			lastErr = err
+			// If Traefik isn't listening on port 80 (connection refused / dial error),
+			// don't burn the entire timeout waiting.
+			if isNetworkDialError(err) {
+				consecutiveDialErrors++
+				if consecutiveDialErrors >= 2 {
+					log.Printf("Traefik not reachable at %s (%v) — skipping Traefik cutover wait", endpoint, err)
+					return
+				}
+			}
+		}
+
+		select {
+		case <-probeCtx.Done():
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("Traefik route probe timed out after %s for %s%s (last_status=%d last_err=%v) — proceeding", timeout, host, path, lastStatus, lastErr)
+			if onLog != nil {
+				onLog(fmt.Sprintf("Traefik route probe timed out after %s — proceeding with deployment", timeout))
+			}
+			return
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func isNetworkDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	return false
 }
 
 // autoDetectHealthPath tries common health check paths and returns the first

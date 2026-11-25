@@ -23,8 +23,9 @@ import (
 	"github.com/clankhost/clank-agent/internal/sysinfo"
 )
 
-// Terminal deploy statuses — if Send fails for these, queue for retry.
+// Terminal/milestone deploy statuses — if Send fails for these, queue for retry.
 var terminalDeployStatuses = map[string]bool{
+	"built":        true,
 	"active":       true,
 	"failed":       true,
 	"build_failed": true,
@@ -126,6 +127,14 @@ func (h *CommandHandler) queuePendingResult(msg *clankv1.AgentMessage) {
 	}
 }
 
+// PendingResultCount returns the number of buffered deploy/build results
+// waiting to be flushed on the next live control-plane stream.
+func (h *CommandHandler) PendingResultCount() int {
+	h.pendingMu.Lock()
+	defer h.pendingMu.Unlock()
+	return len(h.pendingResults)
+}
+
 // DrainPendingResults sends any queued deploy results on the given stream.
 // Called by the agent after establishing a new connection.
 func (h *CommandHandler) DrainPendingResults(stream grpcclient.ConnectStream) {
@@ -139,14 +148,17 @@ func (h *CommandHandler) DrainPendingResults(stream grpcclient.ConnectStream) {
 	}
 
 	log.Printf("Draining %d pending deploy result(s) on new connection", len(results))
-	for _, msg := range results {
+	for i, msg := range results {
 		if err := stream.Send(msg); err != nil {
 			if strings.Contains(err.Error(), "invalid UTF-8") {
 				log.Printf("Dropping poison message with invalid UTF-8 (would never succeed): %v", err)
 				continue
 			}
-			log.Printf("Failed to send pending result on new stream: %v (re-queuing)", err)
-			h.queuePendingResult(msg)
+			log.Printf("Failed to send pending result on new stream: %v (re-queuing %d remaining)", err, len(results)-i)
+			for _, rem := range results[i:] {
+				h.queuePendingResult(rem)
+			}
+			return
 		} else {
 			// Log what we sent
 			if dp := msg.GetDeployProgress(); dp != nil {
@@ -202,7 +214,7 @@ func (h *CommandHandler) markDeploymentSeen(deployID string) {
 	if h.deploymentsSeen == nil {
 		h.deploymentsSeen = make(map[string]time.Time)
 	}
-	h.deploymentsSeen[deployID] = time.Now().Add(2 * time.Minute)
+	h.deploymentsSeen[deployID] = time.Now().Add(detachedDeployTimeout)
 }
 
 func (h *CommandHandler) isDeploymentSeen(deployID string) bool {

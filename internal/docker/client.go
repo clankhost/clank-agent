@@ -185,24 +185,65 @@ func (m *Manager) PushImage(ctx context.Context, img string, auth *RegistryAuth,
 	return nil
 }
 
+// ImageBuildOpts configures a legacy Docker Engine API image build.
+type ImageBuildOpts struct {
+	ContextPath string
+	Tag         string
+	Dockerfile  string
+	CacheFrom   []string
+	Labels      map[string]string
+	BuildArgs   map[string]string
+	Target      string
+	NoCache     bool
+}
+
 // BuildImage builds a Docker image from a context directory.
 // cacheFrom optionally specifies images to use as layer cache sources.
 func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile string, cacheFrom []string, labels map[string]string, onLog func(string)) error {
-	onLog(fmt.Sprintf("Building image %s...", tag))
+	return m.BuildImageWithOpts(ctx, ImageBuildOpts{
+		ContextPath: contextPath,
+		Tag:         tag,
+		Dockerfile:  dockerfile,
+		CacheFrom:   cacheFrom,
+		Labels:      labels,
+	}, onLog)
+}
+
+// BuildImageWithOpts builds a Docker image via the Docker Engine API with full
+// support for build args, target stage, and no-cache options.
+func (m *Manager) BuildImageWithOpts(ctx context.Context, opts ImageBuildOpts, onLog func(string)) error {
+	onLog(fmt.Sprintf("Building image %s...", opts.Tag))
 
 	// Create a tar archive of the build context
-	tar, err := goarchive.TarWithOptions(contextPath, &goarchive.TarOptions{})
+	tar, err := goarchive.TarWithOptions(opts.ContextPath, &goarchive.TarOptions{})
 	if err != nil {
 		return fmt.Errorf("creating build context tar: %w", err)
 	}
 	defer tar.Close()
 
+	var buildArgs map[string]*string
+	if len(opts.BuildArgs) > 0 {
+		buildArgs = make(map[string]*string, len(opts.BuildArgs))
+		for k, v := range opts.BuildArgs {
+			val := v
+			buildArgs[k] = &val
+		}
+	}
+
+	cacheFrom := opts.CacheFrom
+	if opts.NoCache {
+		cacheFrom = nil
+	}
+
 	resp, err := m.cli.ImageBuild(ctx, tar, build.ImageBuildOptions{
-		Tags:       []string{tag},
-		Dockerfile: dockerfile,
+		Tags:       []string{opts.Tag},
+		Dockerfile: opts.Dockerfile,
 		Remove:     true,
 		CacheFrom:  cacheFrom,
-		Labels:     labels,
+		NoCache:    opts.NoCache,
+		BuildArgs:  buildArgs,
+		Target:     opts.Target,
+		Labels:     opts.Labels,
 		// Limit build resources to prevent runaway builds from exhausting host
 		Memory:   2 * 1024 * 1024 * 1024, // 2 GB
 		CPUQuota: 200000,                 // 2 cores (100000 per core)
@@ -236,7 +277,7 @@ func (m *Manager) BuildImage(ctx context.Context, contextPath, tag, dockerfile s
 		}
 	}
 
-	onLog(fmt.Sprintf("Image %s built", tag))
+	onLog(fmt.Sprintf("Image %s built", opts.Tag))
 	return nil
 }
 

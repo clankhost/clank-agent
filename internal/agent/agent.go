@@ -20,19 +20,22 @@ import (
 	"github.com/clankhost/clank-agent/internal/metrics"
 	"github.com/clankhost/clank-agent/internal/selfupdate"
 	"github.com/clankhost/clank-agent/internal/sysinfo"
+	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
 	"google.golang.org/grpc"
 )
 
 const (
-	heartbeatInterval = 30 * time.Second
-	reconnectBaseWait = 2 * time.Second
-	reconnectMaxWait  = 60 * time.Second
+	heartbeatInterval     = 30 * time.Second
+	reconnectBaseWait     = 2 * time.Second
+	reconnectMaxWait      = 60 * time.Second
+	detachedDeployTimeout = 30 * time.Minute
 )
 
 const streamReconnectWait = 5 * time.Second
 
 // Agent manages the lifecycle of the gRPC connection and heartbeat loop.
 type Agent struct {
+	rootCtx      context.Context
 	cfg          *Config
 	cfgMu        *sync.RWMutex
 	credentialMu sync.Mutex
@@ -88,6 +91,8 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 // It reconnects on errors with exponential backoff.
 // Returns when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	a.rootCtx = ctx
+
 	// Post-update self-check: verify the new binary can connect.
 	// If this fails repeatedly, roll back to the previous binary.
 	a.checkPendingUpdate(ctx)
@@ -271,17 +276,7 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	}()
 
 	// Receive loop — listen for commands from control plane
-	handlers := grpcclient.CommandHandlers{
-		OnDeploy:             a.handler.HandleDeploy,
-		OnContainerCommand:   a.handler.HandleContainerCommand,
-		OnTunnelConfig:       a.handler.HandleTunnelConfig,
-		OnUpdate:             a.handler.HandleUpdate,
-		OnEndpoint:           a.handler.HandleEndpoint,
-		OnBackup:             a.handler.HandleBackup,
-		OnPushImage:          a.handler.HandlePushImage,
-		OnMaintenance:        a.handler.HandleMaintenance,
-		OnCredentialRotation: a.handleCredentialRotation,
-	}
+	handlers := a.commandHandlers()
 	go func() {
 		errCh <- grpcclient.ReceiveCommands(streamCtx, a.streams.routed(stream), handlers)
 	}()
@@ -296,6 +291,45 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 		return nil
 	case err := <-errCh:
 		return err
+	}
+}
+
+// detachedCommandContext returns a bounded context derived from the agent's
+// root lifecycle context rather than the per-connection gRPC stream context.
+// This ensures in-flight Docker builds, deploys, pushes, and backups survive
+// gRPC stream disconnects/reconnects and are only cancelled on agent shutdown
+// or when detachedDeployTimeout elapses.
+func (a *Agent) detachedCommandContext() (context.Context, context.CancelFunc) {
+	base := a.rootCtx
+	if base == nil {
+		base = context.Background()
+	}
+	return context.WithTimeout(base, detachedDeployTimeout)
+}
+
+func (a *Agent) commandHandlers() grpcclient.CommandHandlers {
+	return grpcclient.CommandHandlers{
+		OnDeploy: func(_ context.Context, stream grpcclient.ConnectStream, cmd *clankv1.DeployCommand) {
+			deployCtx, cancel := a.detachedCommandContext()
+			defer cancel()
+			a.handler.HandleDeploy(deployCtx, stream, cmd)
+		},
+		OnContainerCommand: a.handler.HandleContainerCommand,
+		OnTunnelConfig:     a.handler.HandleTunnelConfig,
+		OnUpdate:           a.handler.HandleUpdate,
+		OnEndpoint:         a.handler.HandleEndpoint,
+		OnBackup: func(_ context.Context, stream grpcclient.ConnectStream, cmd *clankv1.BackupCommand) {
+			backupCtx, cancel := a.detachedCommandContext()
+			defer cancel()
+			a.handler.HandleBackup(backupCtx, stream, cmd)
+		},
+		OnPushImage: func(_ context.Context, stream grpcclient.ConnectStream, cmd *clankv1.PushImageCommand) {
+			pushCtx, cancel := a.detachedCommandContext()
+			defer cancel()
+			a.handler.HandlePushImage(pushCtx, stream, cmd)
+		},
+		OnMaintenance:        a.handler.HandleMaintenance,
+		OnCredentialRotation: a.handleCredentialRotation,
 	}
 }
 
