@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"path"
 	"regexp"
 	"sort"
@@ -27,10 +28,16 @@ import (
 )
 
 const (
-	backupVolumeName       = "clank-backups"
-	alpineHelperImage      = "alpine:3.20"
-	helperImagePullTimeout = 2 * time.Minute
-	maxHelperLogBytes      = 1 << 20 // 1 MiB
+	backupVolumeName        = "clank-backups"
+	alpineHelperImage       = "alpine:3.20"
+	helperImagePullTimeout  = 2 * time.Minute
+	maxHelperLogBytes       = 1 << 20 // 1 MiB
+	envOffsiteUploadURL     = "__CLANK_OFFSITE_UPLOAD_URL"
+	envOffsiteDownloadURL   = "__CLANK_OFFSITE_DOWNLOAD_URL"
+	offsiteTransferTimeout  = 15 * time.Minute
+	maxOffsiteDownloadBytes = 20 << 30 // 20 GiB
+	offsiteUploadedMarker   = "offsite_uploaded"
+	restoreCompletedMarker  = "restore_completed"
 )
 
 var safeBackupSegmentRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -77,6 +84,8 @@ type dockerManager interface {
 	StopAndRemove(context.Context, string) error
 	WaitContainer(context.Context, string) (int64, error)
 	ContainerLogs(context.Context, string, bool, string) (io.ReadCloser, error)
+	CopyFromContainer(context.Context, string, string) (io.ReadCloser, error)
+	CopyToContainer(context.Context, string, string, io.Reader) error
 }
 
 type helperImageCoordinator struct {
@@ -96,6 +105,9 @@ type Executor struct {
 	docker             dockerManager
 	helperImage        *helperImageCoordinator
 	helperImageTimeout time.Duration
+	httpClient         *http.Client
+	urlValidator       func(string) error
+	maxDownloadBytes   int64
 }
 
 // NewExecutor creates a backup executor.
@@ -108,6 +120,9 @@ func newExecutor(dm dockerManager, coordinator *helperImageCoordinator, timeout 
 		docker:             dm,
 		helperImage:        coordinator,
 		helperImageTimeout: timeout,
+		httpClient:         &http.Client{},
+		urlValidator:       validateHTTPSOffsiteURL,
+		maxDownloadBytes:   maxOffsiteDownloadBytes,
 	}
 }
 
@@ -173,6 +188,11 @@ func (e *Executor) Execute(ctx context.Context, cmd *clankv1.BackupCommand) *cla
 	backupDir := path.Join(cmd.GetProjectSlug(), cmd.GetServiceSlug(), cmd.GetBackupId())
 	backupType := cmd.GetBackupType()
 
+	// Handle restore operations
+	if strings.HasPrefix(backupType, "restore:") {
+		return e.executeRestore(ctx, cmd, backupDir, backupType)
+	}
+
 	var totalSize int64
 	var allFiles []string
 
@@ -218,6 +238,15 @@ func (e *Executor) Execute(ctx context.Context, cmd *clankv1.BackupCommand) *cla
 	e.writeMetadata(ctx, cmd, backupDir, totalSize, allFiles)
 	allFiles = append(allFiles, "metadata.json")
 
+	// Best-effort offsite upload when presigned URL is provided
+	if uploadURL := strings.TrimSpace(cmd.GetEnvVars()[envOffsiteUploadURL]); uploadURL != "" {
+		if err := e.uploadOffsite(ctx, cmd, backupDir, uploadURL); err != nil {
+			log.Printf("Offsite upload failed for backup %s: %v", cmd.GetBackupId(), err)
+		} else {
+			allFiles = append(allFiles, offsiteUploadedMarker)
+		}
+	}
+
 	// Enforce retention on the agent side
 	if cmd.GetRetentionCount() > 0 {
 		e.enforceRetention(ctx, cmd)
@@ -262,7 +291,7 @@ func (e *Executor) databaseBackup(ctx context.Context, cmd *clankv1.BackupComman
 // runDumpViaHelper runs the database dump from an ephemeral sidecar container
 // that connects to the service's network and writes directly to the backup volume.
 func (e *Executor) runDumpViaHelper(ctx context.Context, cmd *clankv1.BackupCommand, backupDir, outFile, dbType string) (int64, error) {
-	envVars := cmd.GetEnvVars()
+	envVars := sanitizeDBEnvVars(cmd.GetEnvVars())
 	serviceSlug := cmd.GetServiceSlug()
 	backupRoot := path.Join("/backups", backupDir)
 	outPath := path.Join(backupRoot, outFile)

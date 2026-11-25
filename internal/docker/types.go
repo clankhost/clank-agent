@@ -6,6 +6,7 @@ import "github.com/docker/docker/api/types/container"
 type VolumeMount struct {
 	Name      string // Docker volume name (stable across redeploys)
 	MountPath string // Absolute path inside the container
+	ReadOnly  bool   // Mount the volume read-only when true
 }
 
 // RunOpts configures a container to be started.

@@ -46,6 +46,14 @@ type fakeDockerManager struct {
 	runOpts        []docker.RunOpts
 	logStdout      string
 	logStderr      string
+
+	waitFn         func(containerID string, opts docker.RunOpts) (int64, error)
+	copyFromData   []byte
+	copyFromErr    error
+	copyFromPaths  []string
+	copyToData     []byte
+	copyToPaths    []string
+	copyToErr      error
 }
 
 func (f *fakeDockerManager) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -116,8 +124,47 @@ func (f *fakeDockerManager) StopAndRemove(context.Context, string) error {
 	return nil
 }
 
-func (f *fakeDockerManager) WaitContainer(context.Context, string) (int64, error) {
+func (f *fakeDockerManager) WaitContainer(_ context.Context, containerID string) (int64, error) {
+	f.mu.Lock()
+	fn := f.waitFn
+	var matched docker.RunOpts
+	for i, opts := range f.runOpts {
+		if fmt.Sprintf("container-%d", i+1) == containerID {
+			matched = opts
+			break
+		}
+	}
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(containerID, matched)
+	}
 	return 0, nil
+}
+
+func (f *fakeDockerManager) CopyFromContainer(_ context.Context, _ string, srcPath string) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.copyFromPaths = append(f.copyFromPaths, srcPath)
+	if f.copyFromErr != nil {
+		return nil, f.copyFromErr
+	}
+	data := f.copyFromData
+	if data == nil {
+		data = []byte("fake-tar-archive-bytes")
+	}
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func (f *fakeDockerManager) CopyToContainer(_ context.Context, _ string, dstPath string, content io.Reader) error {
+	data, err := io.ReadAll(content)
+	if err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.copyToPaths = append(f.copyToPaths, dstPath)
+	f.copyToData = data
+	return f.copyToErr
 }
 
 func (f *fakeDockerManager) ContainerLogs(context.Context, string, bool, string) (io.ReadCloser, error) {

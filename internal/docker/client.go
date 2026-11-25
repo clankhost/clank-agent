@@ -333,9 +333,10 @@ func (m *Manager) RunContainer(ctx context.Context, opts RunOpts) (string, error
 			return "", fmt.Errorf("invalid volume mount path: %s", vol.MountPath)
 		}
 		mounts = append(mounts, mount.Mount{
-			Type:   mount.TypeVolume,
-			Source: vol.Name,
-			Target: vol.MountPath,
+			Type:     mount.TypeVolume,
+			Source:   vol.Name,
+			Target:   vol.MountPath,
+			ReadOnly: vol.ReadOnly,
 		})
 	}
 
@@ -827,6 +828,27 @@ func (m *Manager) ExecInContainer(ctx context.Context, containerNameOrID string,
 func (m *Manager) WaitContainer(ctx context.Context, containerID string) (int64, error) {
 	statusCh, errCh := m.cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
 	return waitContainerChannels(ctx, statusCh, errCh)
+}
+
+// CopyFromContainer streams a tar archive of srcPath from the given container.
+// The caller is responsible for closing the returned ReadCloser.
+func (m *Manager) CopyFromContainer(ctx context.Context, containerID, srcPath string) (io.ReadCloser, error) {
+	reader, _, err := m.cli.CopyFromContainer(ctx, containerID, srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("copying %s from container %s: %w", srcPath, containerID, err)
+	}
+	return reader, nil
+}
+
+// CopyToContainer extracts a tar archive stream into dstPath inside the given container.
+func (m *Manager) CopyToContainer(ctx context.Context, containerID, dstPath string, content io.Reader) error {
+	err := m.cli.CopyToContainer(ctx, containerID, dstPath, content, container.CopyToContainerOptions{
+		AllowOverwriteDirWithFile: false,
+	})
+	if err != nil {
+		return fmt.Errorf("copying archive to %s in container %s: %w", dstPath, containerID, err)
+	}
+	return nil
 }
 
 func waitContainerChannels(ctx context.Context, statusCh <-chan container.WaitResponse, errCh <-chan error) (int64, error) {
