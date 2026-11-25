@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -304,10 +305,54 @@ func shouldBlueGreen(opts DeployOpts) bool {
 	return opts.HealthConfig.Path != "" && len(opts.Volumes) == 0
 }
 
+const (
+	minReplicas = 1
+	maxReplicas = 10
+)
+
+// extractReplicasAndSanitizeEnv parses the internal __CLANK_REPLICAS control key
+// (default 1, clamped to 1..10) and returns a fresh environment map with all
+// internal __CLANK_* keys stripped so they never leak into runtime containers.
+func extractReplicasAndSanitizeEnv(rawEnv map[string]string) (int, map[string]string) {
+	replicas := minReplicas
+	if rawEnv != nil {
+		if raw, ok := rawEnv["__CLANK_REPLICAS"]; ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(raw)); err == nil {
+				if n < minReplicas {
+					n = minReplicas
+				} else if n > maxReplicas {
+					n = maxReplicas
+				}
+				replicas = n
+			}
+		}
+	}
+
+	cleanEnv := make(map[string]string, len(rawEnv))
+	for k, v := range rawEnv {
+		if strings.HasPrefix(k, "__CLANK_") {
+			continue
+		}
+		cleanEnv[k] = v
+	}
+	return replicas, cleanEnv
+}
+
 // sweepStaleContainers stops and removes all containers matching
 // clank.service_slug=<serviceSlug> except keepContainerID (when non-empty).
 // Returns the number of stale containers removed.
 func (d *Deployer) sweepStaleContainers(ctx context.Context, serviceSlug, keepContainerID string) int {
+	var keepIDs map[string]struct{}
+	if keepContainerID != "" {
+		keepIDs = map[string]struct{}{keepContainerID: {}}
+	}
+	return d.sweepStaleContainersExcept(ctx, serviceSlug, keepIDs)
+}
+
+// sweepStaleContainersExcept stops and removes all containers matching
+// clank.service_slug=<serviceSlug> whose ID is not in keepIDs.
+// Returns the number of stale containers removed.
+func (d *Deployer) sweepStaleContainersExcept(ctx context.Context, serviceSlug string, keepIDs map[string]struct{}) int {
 	containers, err := d.docker.FindAllContainersByLabel(ctx, "clank.service_slug", serviceSlug)
 	if err != nil {
 		log.Printf("Warning: could not list containers for stale cleanup (%s): %v", serviceSlug, err)
@@ -316,7 +361,7 @@ func (d *Deployer) sweepStaleContainers(ctx context.Context, serviceSlug, keepCo
 
 	removed := 0
 	for _, c := range containers {
-		if keepContainerID != "" && c.ID == keepContainerID {
+		if _, keep := keepIDs[c.ID]; keep {
 			continue
 		}
 		log.Printf("Stopping stale container %s (%s) for service %s", c.Name, shortID(c.ID, 12), serviceSlug)
@@ -336,6 +381,11 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	result := &DeployResult{EffectivePort: opts.Port}
 	onProgress("deploying", "Starting deployment...", "", "")
 
+	// Extract desired replica count from internal control env var and strip all
+	// __CLANK_* keys so they never leak into runtime container environments.
+	replicas, cleanEnv := extractReplicasAndSanitizeEnv(opts.Env)
+	opts.Env = cleanEnv
+
 	// Determine which network to start the container on.
 	primaryNetwork := opts.ProjectNetwork
 	if primaryNetwork == "" {
@@ -348,13 +398,14 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// Find all existing containers for this service slug (running and stopped).
 	// Blue-green: keep old containers running until new passes health checks.
+	// Multi-replica deploys always keep old containers running until all new replicas are healthy.
 	// Recreate: stop & remove ALL old containers immediately (databases, volumes, no health path).
 	oldContainers, err := d.docker.FindAllContainersByLabel(ctx, "clank.service_slug", opts.ServiceSlug)
 	if err != nil {
 		log.Printf("Warning: could not search for old containers: %v", err)
 	}
 
-	useBlueGreen := shouldBlueGreen(opts) && len(oldContainers) > 0
+	useBlueGreen := (replicas > 1 || shouldBlueGreen(opts)) && len(oldContainers) > 0
 
 	if len(oldContainers) > 0 && !useBlueGreen {
 		// Recreate strategy: stop and remove ALL existing containers before starting new
@@ -540,6 +591,29 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		if err := d.docker.EnsureVolumeOwnership(ctx, opts.ImageTag, opts.Volumes); err != nil {
 			log.Printf("Warning: volume ownership fix failed: %v", err)
 		}
+	}
+
+	// Multi-replica deploy path (replicas > 1): start N containers, health-check
+	// every replica (rolling back all new replicas on any failure), wait for
+	// Traefik, then sweep stale containers outside the new replica ID set.
+	if replicas > 1 {
+		return d.deployMultiReplica(
+			ctx,
+			opts,
+			result,
+			primaryNetwork,
+			effectivePort,
+			labels,
+			cpuLimit,
+			memoryLimitMB,
+			cmdOverride,
+			entrypointOverride,
+			injectedHealthcheck,
+			imageMeta,
+			replicas,
+			useBlueGreen,
+			onProgress,
+		)
 	}
 
 	// Start container on the project network (isolated) with slug alias for DNS
@@ -949,6 +1023,363 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	log.Println("Health check skipped (no path configured, port status unknown)")
 	onProgress("active", "Deployment active (health check skipped)", containerID[:12], containerName)
 	return result, nil
+}
+
+type startedReplica struct {
+	id   string
+	name string
+	ip   string
+}
+
+// deployMultiReplica starts `replicas` containers for a stateless service,
+// verifies health on every new replica, waits for Traefik to settle, and then
+// sweeps stale containers whose IDs are not in the new replica set.
+// If any replica fails to start or fails health checks, all newly started
+// replicas are stopped and removed while pre-existing containers remain untouched.
+func (d *Deployer) deployMultiReplica(
+	ctx context.Context,
+	opts DeployOpts,
+	result *DeployResult,
+	primaryNetwork string,
+	effectivePort int,
+	labels map[string]string,
+	cpuLimit float64,
+	memoryLimitMB int,
+	cmdOverride []string,
+	entrypointOverride []string,
+	injectedHealthcheck *container.HealthConfig,
+	imageMeta *docker.ImageMeta,
+	replicas int,
+	useBlueGreen bool,
+	onProgress ProgressFunc,
+) (*DeployResult, error) {
+	started := make([]startedReplica, 0, replicas)
+
+	cleanupStarted := func() {
+		for _, rep := range started {
+			log.Printf("Rolling back new replica %s (%s)", rep.name, shortID(rep.id, 12))
+			if stopErr := d.docker.StopAndRemove(ctx, rep.id); stopErr != nil {
+				log.Printf("Warning: failed to remove rolled-back replica %s: %v", rep.name, stopErr)
+			}
+		}
+	}
+
+	shortDeploy := shortID(opts.DeploymentID, 8)
+	for i := 0; i < replicas; i++ {
+		replicaName := fmt.Sprintf("clank-%s-%s-r%d", opts.ServiceSlug, shortDeploy, i)
+		replicaLabels := make(map[string]string, len(labels)+1)
+		for k, v := range labels {
+			replicaLabels[k] = v
+		}
+		replicaLabels["clank.replica_index"] = strconv.Itoa(i)
+
+		containerID, err := d.docker.RunContainer(ctx, docker.RunOpts{
+			Image:         opts.ImageTag,
+			Name:          replicaName,
+			Env:           opts.Env,
+			Port:          effectivePort,
+			Labels:        replicaLabels,
+			Network:       primaryNetwork,
+			NetworkAlias:  opts.ServiceSlug,
+			CPULimit:      cpuLimit,
+			MemoryLimitMB: memoryLimitMB,
+			Command:       cmdOverride,
+			Entrypoint:    entrypointOverride,
+			Volumes:       opts.Volumes,
+			Healthcheck:   injectedHealthcheck,
+		})
+		if err != nil {
+			if strings.Contains(err.Error(), "is already in use") {
+				existingID, _, findErr := d.docker.FindContainerByName(ctx, replicaName)
+				if findErr == nil && existingID != "" {
+					log.Printf("Replica container %s already exists (id: %s), adopting it", replicaName, shortID(existingID, 12))
+					containerID = existingID
+					err = nil
+				}
+			}
+			if err != nil {
+				cleanupStarted()
+				return result, fmt.Errorf("starting replica %d/%d (%s): %w", i+1, replicas, replicaName, err)
+			}
+		}
+
+		started = append(started, startedReplica{id: containerID, name: replicaName})
+		log.Printf("Replica %d/%d (%s) started on network %s (%s)", i+1, replicas, replicaName, primaryNetwork, shortID(containerID, 12))
+		onProgress("deploying", fmt.Sprintf("Started replica %d/%d (%s)", i+1, replicas, replicaName), shortID(containerID, 12), replicaName)
+		if opts.OnLog != nil {
+			opts.OnLog(fmt.Sprintf("Started replica %d/%d (%s)", i+1, replicas, replicaName))
+		}
+	}
+
+	// Extract image digest for tracking (ADR-006)
+	if digest, err := d.docker.GetImageDigest(ctx, opts.ImageTag); err == nil {
+		result.ImageDigest = digest
+	} else {
+		log.Printf("Warning: failed to get image digest: %v", err)
+	}
+
+	// Connect Traefik to the project network so it can route to all replicas
+	if opts.ProjectNetwork != "" {
+		if traefikID := d.docker.FindTraefikContainer(ctx); traefikID != "" {
+			if err := d.docker.ConnectToNetworkIfNeeded(ctx, traefikID, opts.ProjectNetwork); err != nil {
+				log.Printf("Warning: failed to connect Traefik to network %s: %v", opts.ProjectNetwork, err)
+			}
+		}
+	}
+
+	// Crash detection wait
+	crashDelay := d.crashCheckDelay
+	if crashDelay == 0 {
+		crashDelay = 2 * time.Second
+	}
+	if crashDelay > 0 {
+		select {
+		case <-ctx.Done():
+			cleanupStarted()
+			return result, ctx.Err()
+		case <-time.After(crashDelay):
+		}
+	}
+
+	// Inspect every replica for immediate crashes
+	for idx, rep := range started {
+		ci, inspErr := d.docker.InspectContainer(ctx, rep.id)
+		if inspErr != nil {
+			log.Printf("Warning: container inspection failed for %s: %v", rep.name, inspErr)
+			continue
+		}
+		if idx == 0 {
+			result.Inspection = ci
+		}
+		if ci.State == "exited" || ci.State == "dead" {
+			result.Inspection = ci
+			if logs, logErr := d.docker.GetStartupLogs(ctx, rep.id, 100); logErr == nil {
+				result.StartupLogs = logs
+			}
+			cleanupStarted()
+			msg := fmt.Sprintf("Replica %s crashed on startup (exit code %d)", rep.name, ci.ExitCode)
+			if ci.OOMKilled {
+				msg = fmt.Sprintf("Replica %s killed: out of memory (OOMKilled)", rep.name)
+			}
+			return result, fmt.Errorf("%s", msg)
+		}
+	}
+
+	onProgress("health_checking", fmt.Sprintf("All %d replicas started, running health checks...", replicas), shortID(started[0].id, 12), started[0].name)
+	if opts.OnLog != nil {
+		opts.OnLog(fmt.Sprintf("All %d replicas started, running health checks...", replicas))
+	}
+
+	// Resolve IP for every replica
+	for idx := range started {
+		rep := &started[idx]
+		var ip string
+		var ipErr error
+		for ipAttempt := 0; ipAttempt < 3; ipAttempt++ {
+			ip, ipErr = d.docker.GetContainerIP(ctx, rep.id, primaryNetwork)
+			if ipErr == nil {
+				break
+			}
+			ci2, inspErr := d.docker.InspectContainer(ctx, rep.id)
+			if inspErr == nil && (ci2.State == "exited" || ci2.State == "dead") {
+				result.Inspection = ci2
+				if logs, logErr := d.docker.GetStartupLogs(ctx, rep.id, 100); logErr == nil {
+					result.StartupLogs = logs
+				}
+				cleanupStarted()
+				msg := fmt.Sprintf("Replica %s crashed on startup (exit code %d)", rep.name, ci2.ExitCode)
+				if ci2.OOMKilled {
+					msg = fmt.Sprintf("Replica %s killed: out of memory (OOMKilled)", rep.name)
+				}
+				return result, fmt.Errorf("%s", msg)
+			}
+			time.Sleep(time.Second)
+		}
+		if ipErr != nil {
+			if logs, logErr := d.docker.GetStartupLogs(ctx, rep.id, 100); logErr == nil {
+				result.StartupLogs = logs
+			}
+			cleanupStarted()
+			return result, fmt.Errorf("getting IP for replica %s: %w", rep.name, ipErr)
+		}
+		rep.ip = ip
+	}
+	if result.Inspection != nil {
+		result.Inspection.IP = started[0].ip
+	}
+
+	// Probe ports on replica 0 for introspection
+	probePorts := []int{effectivePort}
+	if imageMeta != nil {
+		for _, p := range imageMeta.ExposedPorts {
+			if p != effectivePort {
+				probePorts = append(probePorts, p)
+			}
+		}
+	}
+	probeResults := docker.ProbeAllPorts(ctx, started[0].ip, probePorts)
+	result.Ports = probeResults
+
+	primaryProtocol := "closed"
+	for _, pr := range probeResults {
+		if pr.Port == effectivePort {
+			primaryProtocol = pr.Protocol
+			break
+		}
+	}
+	isHTTP := primaryProtocol == "http"
+	result.IsHTTP = isHTTP
+
+	// Run health checks on EVERY replica
+	hc := opts.HealthConfig
+	healthPath := hc.Path
+	if healthPath == "" && isHTTP {
+		healthPath = autoDetectHealthPath(started[0].ip, effectivePort)
+	}
+
+	if healthPath != "" {
+		hcCheck := hc
+		hcCheck.Path = healthPath
+		for idx, rep := range started {
+			if _, err := d.checkReplicaHTTPHealth(ctx, result, rep.id, rep.name, rep.ip, effectivePort, hcCheck, opts.OnLog); err != nil {
+				if useBlueGreen {
+					log.Printf("Multi-replica deploy failed on replica %d/%d (%s): existing container(s) for %s continue serving", idx+1, replicas, rep.name, opts.ServiceSlug)
+				}
+				cleanupStarted()
+				return result, fmt.Errorf("replica %d/%d (%s): %w", idx+1, replicas, rep.name, err)
+			}
+		}
+	} else if primaryProtocol == "closed" {
+		retries := 6
+		interval := 10
+		if hc.Retries > retries {
+			retries = hc.Retries
+		}
+		if hc.IntervalSeconds > interval {
+			interval = hc.IntervalSeconds
+		}
+		for idx, rep := range started {
+			opened := false
+			for attempt := 1; attempt <= retries; attempt++ {
+				select {
+				case <-ctx.Done():
+					cleanupStarted()
+					return result, ctx.Err()
+				case <-time.After(time.Duration(interval) * time.Second):
+				}
+				ci2, inspErr := d.docker.InspectContainer(ctx, rep.id)
+				if inspErr == nil && (ci2.State == "exited" || ci2.State == "dead") {
+					result.Inspection = ci2
+					if logs, logErr := d.docker.GetStartupLogs(ctx, rep.id, 100); logErr == nil {
+						result.StartupLogs = logs
+					}
+					cleanupStarted()
+					return result, fmt.Errorf("replica %d/%d (%s) exited during startup (exit code %d)", idx+1, replicas, rep.name, ci2.ExitCode)
+				}
+				proto := docker.ProbePort(ctx, rep.ip, effectivePort)
+				if proto == "http" || proto == "tcp" {
+					opened = true
+					break
+				}
+			}
+			if !opened {
+				if logs, logErr := d.docker.GetStartupLogs(ctx, rep.id, 100); logErr == nil {
+					result.StartupLogs = logs
+				}
+				cleanupStarted()
+				return result, fmt.Errorf("replica %d/%d (%s): port %d never opened after %d attempts", idx+1, replicas, rep.name, effectivePort, retries)
+			}
+		}
+	}
+
+	// Wait for Traefik to pick up all new replica containers
+	traefikProbePath := healthPath
+	if traefikProbePath == "" {
+		traefikProbePath = "/"
+	}
+	d.waitForTraefikReady(ctx, opts, traefikProbePath, opts.OnLog)
+
+	if useBlueGreen {
+		cutoverDelay := d.cutoverDelay
+		if cutoverDelay == 0 {
+			cutoverDelay = 2 * time.Second
+		}
+		if cutoverDelay > 0 {
+			select {
+			case <-ctx.Done():
+				return result, ctx.Err()
+			case <-time.After(cutoverDelay):
+			}
+		}
+	}
+
+	// Sweep all stale containers for this service slug outside the new replica ID set
+	keepIDs := make(map[string]struct{}, len(started))
+	for _, rep := range started {
+		keepIDs[rep.id] = struct{}{}
+	}
+	if cleaned := d.sweepStaleContainersExcept(ctx, opts.ServiceSlug, keepIDs); cleaned > 0 {
+		onProgress("deploying", "Traffic switched to new version", "", "")
+	}
+
+	onProgress("active", fmt.Sprintf("All %d replicas healthy", replicas), shortID(started[0].id, 12), started[0].name)
+	return result, nil
+}
+
+// checkReplicaHTTPHealth runs HTTP health checks against a single replica without
+// removing containers on failure (caller handles rolling back all replicas).
+func (d *Deployer) checkReplicaHTTPHealth(
+	ctx context.Context,
+	result *DeployResult,
+	containerID, containerName, ip string,
+	port int,
+	hc HealthConfig,
+	onLog func(string),
+) (int, error) {
+	if hc.Retries <= 0 {
+		hc.Retries = 3
+	}
+	if hc.IntervalSeconds <= 0 {
+		hc.IntervalSeconds = 10
+	}
+	if hc.TimeoutSeconds <= 0 {
+		hc.TimeoutSeconds = 5
+	}
+
+	if hc.StartupGraceSeconds > 0 {
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(time.Duration(hc.StartupGraceSeconds) * time.Second):
+		}
+	}
+
+	healthURL := fmt.Sprintf("http://%s:%d%s", ip, port, hc.Path)
+	for attempt := 1; attempt <= hc.Retries; attempt++ {
+		if onLog != nil {
+			onLog(fmt.Sprintf("Health check %s (%s) attempt %d/%d...", hc.Path, containerName, attempt, hc.Retries))
+		}
+		if checkHTTPHealth(healthURL, hc.TimeoutSeconds) {
+			log.Printf("Health check passed for %s on attempt %d", containerName, attempt)
+			if onLog != nil {
+				onLog(fmt.Sprintf("Health check passed for %s (attempt %d)", containerName, attempt))
+			}
+			return attempt, nil
+		}
+		log.Printf("Health check failed for %s (attempt %d/%d)", containerName, attempt, hc.Retries)
+		if attempt < hc.Retries {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(time.Duration(hc.IntervalSeconds) * time.Second):
+			}
+		}
+	}
+
+	if logs, logErr := d.docker.GetStartupLogs(ctx, containerID, 100); logErr == nil {
+		result.StartupLogs = logs
+	}
+	return 0, fmt.Errorf("health checks failed after %d attempts", hc.Retries)
 }
 
 // waitForDockerHealthy polls Docker's health status until the container reports "healthy".
