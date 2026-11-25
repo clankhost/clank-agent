@@ -1,6 +1,7 @@
 package sysinfo
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -117,8 +118,14 @@ func isPrivateIP(ip net.IP) bool {
 // public IPv4 address. Returns "" on any failure (timeout, no internet, etc).
 // Uses a short timeout to avoid blocking heartbeats on slow networks.
 func detectPublicIP() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
+	if err != nil {
+		return ""
+	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("https://api.ipify.org")
+	resp, err := client.Do(req)
 	if err != nil {
 		return ""
 	}
@@ -156,7 +163,9 @@ func detectTailscale() (ip, hostname string, cliAvailable bool) {
 	}
 	cliAvailable = true
 
-	out, err := exec.Command("tailscale", "status", "--json").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
 	if err != nil {
 		return "", "", true // CLI exists but tailscale not running/connected
 	}

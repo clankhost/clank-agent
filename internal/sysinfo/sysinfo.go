@@ -1,10 +1,12 @@
 package sysinfo
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/shirou/gopsutil/v4/mem"
 )
@@ -62,7 +64,9 @@ func Collect() *Info {
 }
 
 func detectDocker() string {
-	out, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Output()
 	if err != nil {
 		return ""
 	}

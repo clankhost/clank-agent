@@ -241,7 +241,10 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	}
 	defer conn.Close()
 
-	raw, err := grpcclient.OpenConnectStream(ctx, conn)
+	streamCtx, streamCancel := context.WithCancel(ctx)
+	defer streamCancel()
+
+	raw, err := grpcclient.OpenConnectStream(streamCtx, conn)
 	if err != nil {
 		return fmt.Errorf("opening stream: %w", err)
 	}
@@ -260,11 +263,9 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	// the stream was down (e.g., Cloudflare RST_STREAM mid-deploy).
 	a.handler.DrainPendingResults(stream)
 
-	// Start heartbeat sender in a goroutine
-	streamCtx, streamCancel := context.WithCancel(ctx)
-	defer streamCancel()
-
-	errCh := make(chan error, 1)
+	// Buffer capacity 2 ensures both sendHeartbeats and ReceiveCommands can
+	// deliver their terminal error without leaking a goroutine on disconnect.
+	errCh := make(chan error, 2)
 	go func() {
 		errCh <- a.sendHeartbeats(streamCtx, stream, quiet)
 	}()
@@ -282,7 +283,7 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 		OnCredentialRotation: a.handleCredentialRotation,
 	}
 	go func() {
-		errCh <- grpcclient.ReceiveCommands(ctx, a.streams.routed(stream), handlers)
+		errCh <- grpcclient.ReceiveCommands(streamCtx, a.streams.routed(stream), handlers)
 	}()
 
 	// Start log and metrics streamers (per-connection, cancelled on disconnect)

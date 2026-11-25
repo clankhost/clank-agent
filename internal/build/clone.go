@@ -23,16 +23,16 @@ func CloneRepo(ctx context.Context, repoURL, branch, gitToken string) (cloneDir 
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, repoURL, cloneDir)
+	args = append(args, "--", repoURL, cloneDir)
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = os.TempDir()
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
 	// Use GIT_ASKPASS to supply credentials without exposing the token
-	// in the process argument list (/proc/<pid>/cmdline).
+	// in the process argument list (/proc/<pid>/cmdline) or writing it to disk.
 	if gitToken != "" {
-		askpassScript, cleanupAskpass, askErr := writeAskpassHelper(gitToken)
+		askpassScript, cleanupAskpass, askErr := writeAskpassHelper()
 		if askErr != nil {
 			os.RemoveAll(cloneDir)
 			return "", "", fmt.Errorf("creating askpass helper: %w", askErr)
@@ -50,6 +50,7 @@ func CloneRepo(ctx context.Context, repoURL, branch, gitToken string) (cloneDir 
 		cmd.Env = append(cmd.Env,
 			"GIT_ASKPASS="+askpassScript,
 			"GIT_USERNAME="+gitUsername,
+			"CLANK_GIT_TOKEN="+gitToken,
 		)
 	}
 
@@ -76,9 +77,10 @@ func CloneRepo(ctx context.Context, repoURL, branch, gitToken string) (cloneDir 
 }
 
 // writeAskpassHelper creates a temporary shell script that outputs the git
-// token when invoked by git. The script is only readable by the current user.
+// token from CLANK_GIT_TOKEN when invoked by git. The token is never written
+// to disk. The script is only readable by the current user.
 // Returns the script path and a cleanup function.
-func writeAskpassHelper(token string) (scriptPath string, cleanup func(), err error) {
+func writeAskpassHelper() (scriptPath string, cleanup func(), err error) {
 	f, err := os.CreateTemp("", "clank-askpass-*.sh")
 	if err != nil {
 		return "", nil, err
@@ -87,12 +89,12 @@ func writeAskpassHelper(token string) (scriptPath string, cleanup func(), err er
 
 	// The script checks if git is asking for a password or username.
 	// GIT_ASKPASS is called with a prompt like "Password for ..." or "Username for ...".
-	script := fmt.Sprintf(`#!/bin/sh
+	const script = `#!/bin/sh
 case "$1" in
-  *assword*) echo '%s' ;;
-  *sername*) echo "${GIT_USERNAME:-x-access-token}" ;;
+  *assword*) printf '%s\n' "$CLANK_GIT_TOKEN" ;;
+  *sername*) printf '%s\n' "${GIT_USERNAME:-x-access-token}" ;;
 esac
-`, token)
+`
 
 	if _, err := f.WriteString(script); err != nil {
 		f.Close()

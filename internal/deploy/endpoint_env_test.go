@@ -480,6 +480,40 @@ func TestGenerateHexToken(t *testing.T) {
 	}
 }
 
+func TestBuildWordPressConfig_EscapesQuotesAndRejectsControlChars(t *testing.T) {
+	// Single quote breakout attempt must be escaped
+	cfg := buildWordPressConfig("https://example.com/a'b", "/a'b")
+	if !contains(cfg, `$clank_prefix = '/a\'b';`) {
+		t.Errorf("expected escaped single quote in pathPrefix, got:\n%s", cfg)
+	}
+
+	// Newline injection must be rejected
+	if cfg := buildWordPressConfig("https://example.com\nEvil", ""); cfg != "" {
+		t.Errorf("expected empty config for newline injection, got %q", cfg)
+	}
+}
+
+func TestInjectOpenClawEnvVars_RejectsUnsafeOrigin(t *testing.T) {
+	env := map[string]string{}
+	injectOpenClawEnvVars(env, "https://bad'host;rm -rf /", "")
+	cmd := env["CLANK_CONTAINER_CMD"]
+	if contains(cmd, "rm -rf") {
+		t.Fatalf("unsafe hostname was not rejected: %q", cmd)
+	}
+	if !contains(cmd, `"allowedOrigins":[]`) {
+		t.Fatalf("expected empty allowedOrigins for rejected host, got %q", cmd)
+	}
+}
+
+func TestShortID(t *testing.T) {
+	if got := shortID("abc", 8); got != "abc" {
+		t.Errorf("shortID(abc, 8) = %q, want abc", got)
+	}
+	if got := shortID("123456789", 8); got != "12345678" {
+		t.Errorf("shortID(123456789, 8) = %q, want 12345678", got)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

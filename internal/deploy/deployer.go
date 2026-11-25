@@ -378,7 +378,7 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	}
 
 	// Container name
-	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, opts.DeploymentID[:8])
+	containerName := fmt.Sprintf("clank-%s-%s", opts.ServiceSlug, shortID(opts.DeploymentID, 8))
 
 	// Fast path: if a container with this exact name already exists and is
 	// running, this is a retry for the same deployment (stream broke before
@@ -1264,30 +1264,74 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 			if idx := strings.Index(hostname, "/"); idx > 0 {
 				hostname = hostname[:idx]
 			}
-			origins = append(origins, fmt.Sprintf("https://%s", hostname), fmt.Sprintf("http://%s", hostname))
-		}
-
-		originsJSON := "[]"
-		if len(origins) > 0 {
-			parts := make([]string, len(origins))
-			for i, o := range origins {
-				parts[i] = fmt.Sprintf(`"%s"`, o)
+			// Strip any port for domain validation, or validate host[:port] safely
+			hostOnly := hostname
+			if colonIdx := strings.LastIndex(hostname, ":"); colonIdx > 0 {
+				hostOnly = hostname[:colonIdx]
 			}
-			originsJSON = "[" + strings.Join(parts, ",") + "]"
+			if safeDomainRe.MatchString(hostOnly) && !strings.ContainsAny(hostname, "'\"\\\r\n\x00") {
+				origins = append(origins, fmt.Sprintf("https://%s", hostname), fmt.Sprintf("http://%s", hostname))
+			} else {
+				log.Printf("Rejected unsafe OpenClaw origin hostname: %q", hostname)
+			}
 		}
 
-		// Write config JSON directly to ~/.openclaw/openclaw.json (the default
-		// path OpenClaw reads). Single-line JSON avoids heredoc/newline issues
-		// inside Docker sh -c.
-		configJSON := fmt.Sprintf(
-			`{"gateway":{"mode":"local","bind":"lan","trustedProxies":["172.16.0.0/12","192.168.0.0/16","10.0.0.0/8"],"auth":{"mode":"token"},"controlUi":{"allowedOrigins":%s}}}`,
-			originsJSON,
-		)
+		type openClawAuth struct {
+			Mode string `json:"mode"`
+		}
+		type openClawControlUI struct {
+			AllowedOrigins []string `json:"allowedOrigins"`
+		}
+		type openClawGateway struct {
+			Mode           string            `json:"mode"`
+			Bind           string            `json:"bind"`
+			TrustedProxies []string          `json:"trustedProxies"`
+			Auth           openClawAuth      `json:"auth"`
+			ControlUI      openClawControlUI `json:"controlUi"`
+		}
+		type openClawConfig struct {
+			Gateway openClawGateway `json:"gateway"`
+		}
 
-		writeConfig := fmt.Sprintf(`mkdir -p ~/.openclaw && printf '%%s' '%s' > ~/.openclaw/openclaw.json`, configJSON)
+		cfgBytes, err := json.Marshal(openClawConfig{
+			Gateway: openClawGateway{
+				Mode:           "local",
+				Bind:           "lan",
+				TrustedProxies: []string{"172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"},
+				Auth:           openClawAuth{Mode: "token"},
+				ControlUI:      openClawControlUI{AllowedOrigins: origins},
+			},
+		})
+		if err != nil {
+			log.Printf("Failed to marshal OpenClaw config: %v", err)
+			return
+		}
+
+		// Escape any single quotes for POSIX single-quoted shell literal safety.
+		escapedJSON := escapePOSIXSingleQuotes(string(cfgBytes))
+		writeConfig := fmt.Sprintf(`mkdir -p ~/.openclaw && printf '%%s' '%s' > ~/.openclaw/openclaw.json`, escapedJSON)
 
 		env["CLANK_CONTAINER_CMD"] = writeConfig + " && exec node dist/index.js gateway --allow-unconfigured --auth token"
 	}
+}
+
+// escapePOSIXSingleQuotes safely escapes single quotes for embedding inside '...' in POSIX sh.
+func escapePOSIXSingleQuotes(s string) string {
+	return strings.ReplaceAll(s, "'", `'\''`)
+}
+
+// escapePHPSingleQuoted safely escapes backslashes and single quotes for PHP single-quoted strings.
+func escapePHPSingleQuoted(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
+	return s
+}
+
+func shortID(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // buildWordPressConfig generates the PHP snippet for WORDPRESS_CONFIG_EXTRA.
@@ -1295,6 +1339,14 @@ func injectOpenClawEnvVars(env map[string]string, resolvedURL, pathPrefix string
 // Otherwise it just sets WP_HOME/WP_SITEURL to the resolved URL.
 func buildWordPressConfig(resolvedURL, pathPrefix string) string {
 	if resolvedURL == "" {
+		return ""
+	}
+	if strings.ContainsAny(resolvedURL, "\r\n\x00") || strings.ContainsAny(pathPrefix, "\r\n\x00") {
+		log.Printf("Rejected unsafe control characters in WordPress config inputs")
+		return ""
+	}
+	if !strings.HasPrefix(resolvedURL, "http://") && !strings.HasPrefix(resolvedURL, "https://") {
+		log.Printf("Rejected unsafe WordPress URL scheme: %q", resolvedURL)
 		return ""
 	}
 
@@ -1315,7 +1367,7 @@ func buildWordPressConfig(resolvedURL, pathPrefix string) string {
 				"if (isset($_SERVER['PHP_SELF']) && strpos($_SERVER['PHP_SELF'], $clank_prefix) !== 0) {\n"+
 				"    $_SERVER['PHP_SELF'] = $clank_prefix . $_SERVER['PHP_SELF'];\n"+
 				"}",
-			pathPrefix, hostURL,
+			escapePHPSingleQuoted(pathPrefix), escapePHPSingleQuoted(hostURL),
 		)
 		if strings.HasPrefix(resolvedURL, "https://") {
 			config += "\n$_SERVER['HTTPS'] = 'on';"
@@ -1324,9 +1376,10 @@ func buildWordPressConfig(resolvedURL, pathPrefix string) string {
 	}
 
 	// No path prefix — just set canonical URL.
+	safeURL := escapePHPSingleQuoted(resolvedURL)
 	config := fmt.Sprintf(
 		"define('WP_HOME', '%s');\ndefine('WP_SITEURL', '%s');",
-		resolvedURL, resolvedURL,
+		safeURL, safeURL,
 	)
 	// When behind a TLS-terminating proxy, tell WordPress the connection is
 	// secure. WordPress checks X-Forwarded-Proto by default but this is a
@@ -1339,7 +1392,9 @@ func buildWordPressConfig(resolvedURL, pathPrefix string) string {
 
 // resolveTailscaleHostname discovers the machine's tailnet DNS name.
 func resolveTailscaleHostname() (string, error) {
-	out, err := exec.Command("tailscale", "status", "--json").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "tailscale", "status", "--json").Output()
 	if err != nil {
 		return "", fmt.Errorf("tailscale not available: %w", err)
 	}

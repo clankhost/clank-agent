@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,7 +13,21 @@ import (
 
 	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
 	"github.com/clankhost/clank-agent/internal/docker"
+	"github.com/docker/docker/pkg/stdcopy"
 )
+
+func encodeDockerLogs(stdout, stderr string) []byte {
+	var buf bytes.Buffer
+	if stdout != "" {
+		w := stdcopy.NewStdWriter(&buf, stdcopy.Stdout)
+		_, _ = w.Write([]byte(stdout))
+	}
+	if stderr != "" {
+		w := stdcopy.NewStdWriter(&buf, stdcopy.Stderr)
+		_, _ = w.Write([]byte(stderr))
+	}
+	return buf.Bytes()
+}
 
 type fakeDockerManager struct {
 	mu sync.Mutex
@@ -26,8 +41,11 @@ type fakeDockerManager struct {
 
 	imageChecks    int
 	pulls          int
+	execCalls      int
 	runBeforeImage bool
 	runOpts        []docker.RunOpts
+	logStdout      string
+	logStderr      string
 }
 
 func (f *fakeDockerManager) ImageExists(ctx context.Context, image string) (bool, error) {
@@ -78,6 +96,9 @@ func (f *fakeDockerManager) FindContainerByLabel(context.Context, string, string
 }
 
 func (f *fakeDockerManager) ContainerExec(context.Context, string, []string) (int, string, error) {
+	f.mu.Lock()
+	f.execCalls++
+	f.mu.Unlock()
 	return 0, "", nil
 }
 
@@ -100,7 +121,14 @@ func (f *fakeDockerManager) WaitContainer(context.Context, string) (int64, error
 }
 
 func (f *fakeDockerManager) ContainerLogs(context.Context, string, bool, string) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("128\n")), nil
+	f.mu.Lock()
+	stdout := f.logStdout
+	stderr := f.logStderr
+	f.mu.Unlock()
+	if stdout == "" && stderr == "" {
+		stdout = "128\n"
+	}
+	return io.NopCloser(bytes.NewReader(encodeDockerLogs(stdout, stderr))), nil
 }
 
 func (f *fakeDockerManager) counts() (checks, pulls, runs int, runBeforeImage bool) {
@@ -286,5 +314,107 @@ func TestVolumeBackupProceedsAfterHelperImagePull(t *testing.T) {
 	_, pulls, _, ranBeforeImage := dm.counts()
 	if pulls != 1 || ranBeforeImage {
 		t.Fatalf("pulls=%d ranBeforeImage=%v", pulls, ranBeforeImage)
+	}
+	if result.GetSizeBytes() != 128 {
+		t.Fatalf("size=%d, want 128 (demuxed from Docker log frame)", result.GetSizeBytes())
+	}
+}
+
+func TestExecuteRejectsUnsafeIdentifiers(t *testing.T) {
+	cases := []struct {
+		name        string
+		projectSlug string
+		serviceSlug string
+		backupID    string
+		deleteOnly  bool
+	}{
+		{"traversal project", "../etc", "svc", "backup-1", false},
+		{"slash in service", "proj", "a/b", "backup-1", false},
+		{"shell metachar in backupID", "proj", "svc", "id;rm -rf /", false},
+		{"dotdot in deleteOnly", "proj", "svc", "..", true},
+		{"empty backupID", "proj", "svc", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dm := &fakeDockerManager{imagePresent: true}
+			executor := newExecutor(dm, newHelperImageCoordinator(), time.Second)
+			res := executor.Execute(context.Background(), &clankv1.BackupCommand{
+				CommandId:   "cmd-1",
+				ProjectSlug: tc.projectSlug,
+				ServiceSlug: tc.serviceSlug,
+				BackupId:    tc.backupID,
+				BackupType:  "volume",
+				DeleteOnly:  tc.deleteOnly,
+			})
+			if res.GetSuccess() {
+				t.Fatalf("expected failure for unsafe identifier %+v", tc)
+			}
+			if _, _, runs, _ := dm.counts(); runs != 0 {
+				t.Fatalf("expected 0 container runs on rejected input, got %d", runs)
+			}
+		})
+	}
+}
+
+func TestDatabaseBackupNoDoubleDumpAndNoShellInjection(t *testing.T) {
+	dm := &fakeDockerManager{imagePresent: true, logStdout: "4096\n", logStderr: "warning: ignored\n"}
+	executor := newExecutor(dm, newHelperImageCoordinator(), time.Second)
+
+	secret := "p@ss'word;rm -rf /"
+	res := executor.Execute(context.Background(), &clankv1.BackupCommand{
+		CommandId:     "cmd-db",
+		BackupId:      "short", // < 8 chars, must not panic
+		ProjectSlug:   "proj-1",
+		ServiceSlug:   "db-1",
+		ContainerName: "clank-db-1",
+		BackupType:    "database",
+		DatabaseType:  "postgres",
+		EnvVars: map[string]string{
+			"POSTGRES_USER":     "admin",
+			"POSTGRES_DB":       "appdb",
+			"POSTGRES_PASSWORD": secret,
+		},
+	})
+	if !res.GetSuccess() {
+		t.Fatalf("Execute() failed: %s", res.GetErrorMessage())
+	}
+	if dm.execCalls != 0 {
+		t.Fatalf("ContainerExec called %d times, want 0 (no double-dump)", dm.execCalls)
+	}
+	if res.GetSizeBytes() != 4096 {
+		t.Fatalf("SizeBytes = %d, want 4096", res.GetSizeBytes())
+	}
+
+	containers := dm.containers()
+	if len(containers) < 1 {
+		t.Fatal("expected dump helper container")
+	}
+	dumpHelper := containers[0]
+	if dumpHelper.Env["PGPASSWORD"] != secret {
+		t.Fatalf("expected PGPASSWORD in Env, got %q", dumpHelper.Env["PGPASSWORD"])
+	}
+	if strings.Contains(strings.Join(dumpHelper.Command, " "), secret) {
+		t.Fatalf("secret must not appear in container command: %v", dumpHelper.Command)
+	}
+	if len(dumpHelper.Command) < 2 || dumpHelper.Command[1] != "--" {
+		t.Fatalf("expected positional args separator '--' in Command, got %v", dumpHelper.Command)
+	}
+}
+
+func TestExecInHelperDemuxesStdcopy(t *testing.T) {
+	dm := &fakeDockerManager{
+		imagePresent: true,
+		logStdout:    "clean-output\n",
+		logStderr:    "noisy-stderr\n",
+	}
+	executor := newExecutor(dm, newHelperImageCoordinator(), time.Second)
+
+	out, err := executor.execInHelper(context.Background(), `echo "$1"`, "arg1")
+	if err != nil {
+		t.Fatalf("execInHelper() error = %v", err)
+	}
+	if out != "clean-output\n" {
+		t.Fatalf("execInHelper() = %q, want %q", out, "clean-output\n")
 	}
 }

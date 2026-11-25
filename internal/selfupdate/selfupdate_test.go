@@ -3,6 +3,7 @@ package selfupdate
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -135,36 +137,111 @@ func TestErrorPhase_NonPhaseError(t *testing.T) {
 }
 
 func TestBackupAndApply_RestoresOnFailure(t *testing.T) {
-	// Create a "current binary"
 	tmpDir := t.TempDir()
 	fakeBin := filepath.Join(tmpDir, "clank-agent")
 	originalContent := "#!/bin/sh\necho original"
-	os.WriteFile(fakeBin, []byte(originalContent), 0755)
+	if err := os.WriteFile(fakeBin, []byte(originalContent), 0755); err != nil {
+		t.Fatal(err)
+	}
 
-	// BackupAndApply with a server that returns 404 (download failure)
+	origResolver := execPathResolver
+	execPathResolver = func() (string, error) { return fakeBin, nil }
+	t.Cleanup(func() { execPathResolver = origResolver })
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "not found", 404)
+		http.Error(w, "not found", http.StatusNotFound)
 	}))
 	defer srv.Close()
 
-	// We can't easily test BackupAndApply since os.Executable() won't point
-	// to our fake binary. Instead, test the Rollback mechanism directly.
+	err := BackupAndApply(srv.URL+"/missing.tar.gz", "", "", "1.0.0", "2.0.0")
+	if err == nil {
+		t.Fatal("expected BackupAndApply to fail on 404")
+	}
+	if ErrorPhase(err) != "download" {
+		t.Fatalf("expected phase 'download', got %q", ErrorPhase(err))
+	}
+
+	got, readErr := os.ReadFile(fakeBin)
+	if readErr != nil {
+		t.Fatalf("reading restored binary: %v", readErr)
+	}
+	if string(got) != originalContent {
+		t.Fatalf("restored binary = %q, want %q", string(got), originalContent)
+	}
+}
+
+func TestRollback_RestoresPreviousBinary(t *testing.T) {
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "clank-agent")
 	backupPath := filepath.Join(tmpDir, "clank-agent.prev")
-	os.WriteFile(backupPath, []byte("#!/bin/sh\necho backup"), 0755)
 
-	// Corrupt the "current" binary
-	os.WriteFile(fakeBin, []byte("corrupted"), 0755)
+	if err := os.WriteFile(fakeBin, []byte("broken-new-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, []byte("good-old-binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
-	// Verify backup exists
-	if _, err := os.Stat(backupPath); os.IsNotExist(err) {
-		t.Fatal("backup should exist")
+	origResolver := execPathResolver
+	execPathResolver = func() (string, error) { return fakeBin, nil }
+	t.Cleanup(func() { execPathResolver = origResolver })
+
+	if err := Rollback(); err != nil {
+		t.Fatalf("Rollback() failed: %v", err)
+	}
+
+	got, err := os.ReadFile(fakeBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "good-old-binary" {
+		t.Fatalf("binary after rollback = %q, want %q", string(got), "good-old-binary")
+	}
+}
+
+func TestApply_EnforcesHTTPS(t *testing.T) {
+	err := Apply("http://example.com/archive.tar.gz", "", "", "1.0.0", "2.0.0")
+	if err == nil {
+		t.Fatal("expected error for non-loopback HTTP URL")
+	}
+	if !strings.Contains(err.Error(), "HTTPS") {
+		t.Fatalf("expected HTTPS error, got %v", err)
+	}
+}
+
+func TestApplyContext_HonorsCancellation(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	err := ApplyContext(ctx, srv.URL+"/slow.tar.gz", "", "", "1.0.0", "2.0.0")
+	if err == nil {
+		t.Fatal("expected error when context is cancelled")
+	}
+	if ErrorPhase(err) != "download" {
+		t.Fatalf("expected phase 'download', got %q", ErrorPhase(err))
 	}
 }
 
 func TestRollback_NoBackup(t *testing.T) {
-	// Rollback now derives the backup path from os.Executable(), so we can't
-	// easily test with a temp dir. Instead, verify that calling Rollback
-	// returns an error (since no backup exists next to the test binary).
+	tmpDir := t.TempDir()
+	fakeBin := filepath.Join(tmpDir, "clank-agent")
+	if err := os.WriteFile(fakeBin, []byte("bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	origResolver := execPathResolver
+	execPathResolver = func() (string, error) { return fakeBin, nil }
+	t.Cleanup(func() { execPathResolver = origResolver })
+
 	err := Rollback()
 	if err == nil {
 		t.Fatal("expected error when no backup exists")

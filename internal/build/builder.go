@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/clankhost/clank-agent/internal/docker"
@@ -77,7 +78,7 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 	}
 	defer CleanupCloneDir(cloneDir)
 
-	buildMsg := fmt.Sprintf("Cloned at %s, starting build...", gitSHA[:8])
+	buildMsg := fmt.Sprintf("Cloned at %s, starting build...", shortID(gitSHA, 8))
 	opts.OnProgress("building", buildMsg)
 	logLine(buildMsg)
 
@@ -86,7 +87,11 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 	if dockerfilePath == "" {
 		dockerfilePath = "Dockerfile"
 	}
-	fullPath := filepath.Join(cloneDir, dockerfilePath)
+	fullPath, cleanRelDockerfile, err := resolveSafeDockerfilePath(cloneDir, dockerfilePath)
+	if err != nil {
+		return nil, err
+	}
+	dockerfilePath = cleanRelDockerfile
 
 	if _, err := os.Stat(fullPath); err == nil {
 		// Repo has its own Dockerfile — use it (always takes priority)
@@ -106,7 +111,7 @@ func (b *Builder) BuildFromSource(ctx context.Context, opts BuildOpts) (*BuildRe
 	}
 
 	// Step 3: Build image (with layer cache from previous build)
-	imageTag := fmt.Sprintf("clank-%s:%s", opts.ServiceSlug, opts.DeploymentID[:12])
+	imageTag := fmt.Sprintf("clank-%s:%s", opts.ServiceSlug, shortID(opts.DeploymentID, 12))
 
 	var cacheFrom []string
 	if prev := b.docker.LatestImageForSlug(ctx, opts.ServiceSlug); prev != "" {
@@ -157,4 +162,35 @@ func imageOwnershipLabels(deploymentID, serviceSlug string) map[string]string {
 
 func isTimeout(ctx context.Context) bool {
 	return ctx.Err() == context.DeadlineExceeded
+}
+
+func shortID(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+// resolveSafeDockerfilePath validates that dockerfilePath resolves strictly inside cloneDir,
+// preventing path traversal (e.g. "../../etc/passwd") or absolute paths.
+func resolveSafeDockerfilePath(cloneDir, dockerfilePath string) (fullPath string, relPath string, err error) {
+	if dockerfilePath == "" {
+		dockerfilePath = "Dockerfile"
+	}
+	if filepath.IsAbs(dockerfilePath) {
+		return "", "", fmt.Errorf("invalid dockerfile path %q: must be relative to repository root", dockerfilePath)
+	}
+	absClone, err := filepath.Abs(cloneDir)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving clone directory: %w", err)
+	}
+	absTarget, err := filepath.Abs(filepath.Join(absClone, dockerfilePath))
+	if err != nil {
+		return "", "", fmt.Errorf("resolving dockerfile path: %w", err)
+	}
+	rel, err := filepath.Rel(absClone, absTarget)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("invalid dockerfile path %q: escapes repository root", dockerfilePath)
+	}
+	return absTarget, filepath.ToSlash(rel), nil
 }

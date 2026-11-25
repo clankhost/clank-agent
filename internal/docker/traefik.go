@@ -54,16 +54,14 @@ func (m *Manager) EnsureTraefik(ctx context.Context, publicIP string) error {
 			"--providers.docker.network=" + servicesNetwork,
 			"--entrypoints.web.address=:80",
 			"--entrypoints.websecure.address=:443",
-			"--api.insecure=true",
 		},
 		Labels: map[string]string{
 			"clank.traefik": "true",
 			"clank.managed": "true",
 		},
 		ExposedPorts: nat.PortSet{
-			"80/tcp":   {},
-			"443/tcp":  {},
-			"8080/tcp": {},
+			"80/tcp":  {},
+			"443/tcp": {},
 		},
 	}
 
@@ -161,7 +159,6 @@ func (m *Manager) ReconfigureTraefikACME(ctx context.Context, publicIP string) e
 			"--entrypoints.websecure.address=:443",
 			"--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web",
 			"--certificatesresolvers.letsencrypt.acme.storage=/acme/acme.json",
-			"--api.insecure=true",
 		},
 		Labels: map[string]string{
 			"clank.traefik":      "true",
@@ -169,9 +166,8 @@ func (m *Manager) ReconfigureTraefikACME(ctx context.Context, publicIP string) e
 			"clank.managed":      "true",
 		},
 		ExposedPorts: nat.PortSet{
-			"80/tcp":   {},
-			"443/tcp":  {},
-			"8080/tcp": {},
+			"80/tcp":  {},
+			"443/tcp": {},
 		},
 	}
 

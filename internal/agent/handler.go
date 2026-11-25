@@ -68,6 +68,11 @@ type CommandHandler struct {
 	// buildSem limits concurrent Docker builds to prevent OOM on
 	// resource-constrained servers. Default capacity: 2.
 	buildSem chan struct{}
+
+	// updateMu guards updateInFlight so concurrent UpdateCommand messages
+	// cannot race and corrupt binary replacement.
+	updateMu       sync.Mutex
+	updateInFlight bool
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
@@ -843,6 +848,21 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 	newVersion := cmd.GetVersion()
 	log.Printf("Self-update: %s → %s", h.currentVersion, newVersion)
 
+	h.updateMu.Lock()
+	if h.updateInFlight {
+		h.updateMu.Unlock()
+		log.Printf("[update] Update already in progress, ignoring concurrent command for %s", newVersion)
+		h.sendUpdateResult(stream, newVersion, false, fmt.Errorf("update already in progress"))
+		return
+	}
+	h.updateInFlight = true
+	h.updateMu.Unlock()
+	defer func() {
+		h.updateMu.Lock()
+		h.updateInFlight = false
+		h.updateMu.Unlock()
+	}()
+
 	// Already running this version — nothing to do, don't exit.
 	if h.currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", newVersion)
@@ -876,7 +896,8 @@ func (h *CommandHandler) HandleUpdate(ctx context.Context, stream grpcclient.Con
 			}
 		}
 
-		lastErr = selfupdate.BackupAndApply(
+		lastErr = selfupdate.BackupAndApplyContext(
+			ctx,
 			cmd.GetDownloadUrl(),
 			cmd.GetSha256(),
 			cmd.GetSignature(),

@@ -7,8 +7,10 @@ import (
 	"encoding/binary"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
 	"github.com/clankhost/clank-agent/internal/docker"
@@ -18,13 +20,32 @@ const (
 	reconcileInterval = 10 * time.Second
 	channelSize       = 4096
 	dropLogInterval   = 30 * time.Second
+	maxLogFrameSize   = 1 << 20 // 1 MiB cap per Docker log frame
 )
+
+type tailerHandle struct {
+	cancel context.CancelFunc
+}
+
+func shortID(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
+func sanitizeUTF8(s string) string {
+	if utf8.ValidString(s) {
+		return s
+	}
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
 
 // Collector watches managed containers and tails their logs.
 type Collector struct {
 	docker  *docker.Manager
 	outCh   chan *clankv1.LogEntry
-	tailers map[string]context.CancelFunc // containerID -> cancel
+	tailers map[string]*tailerHandle // containerID -> handle
 	mu      sync.Mutex
 	dropped int64
 }
@@ -34,7 +55,7 @@ func NewCollector(dm *docker.Manager) *Collector {
 	return &Collector{
 		docker:  dm,
 		outCh:   make(chan *clankv1.LogEntry, channelSize),
-		tailers: make(map[string]context.CancelFunc),
+		tailers: make(map[string]*tailerHandle),
 	}
 }
 
@@ -48,6 +69,9 @@ func (c *Collector) Entries() <-chan *clankv1.LogEntry {
 // gRPC StreamLogs infrastructure as runtime container logs.
 // Non-blocking: drops the entry if the channel is full.
 func (c *Collector) Inject(entry *clankv1.LogEntry) {
+	if entry != nil {
+		entry.Line = sanitizeUTF8(entry.Line)
+	}
 	select {
 	case c.outCh <- entry:
 	default:
@@ -117,15 +141,16 @@ func (c *Collector) reconcile(ctx context.Context) {
 	for id, ci := range current {
 		if _, exists := c.tailers[id]; !exists {
 			tailerCtx, cancel := context.WithCancel(ctx)
-			c.tailers[id] = cancel
-			go c.tailContainer(tailerCtx, ci)
+			handle := &tailerHandle{cancel: cancel}
+			c.tailers[id] = handle
+			go c.tailContainer(tailerCtx, ci, handle)
 		}
 	}
 
 	// Stop tailers for removed containers
-	for id, cancel := range c.tailers {
+	for id, handle := range c.tailers {
 		if _, exists := current[id]; !exists {
-			cancel()
+			handle.cancel()
 			delete(c.tailers, id)
 		}
 	}
@@ -134,15 +159,23 @@ func (c *Collector) reconcile(ctx context.Context) {
 func (c *Collector) stopAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for id, cancel := range c.tailers {
-		cancel()
+	for id, handle := range c.tailers {
+		handle.cancel()
 		delete(c.tailers, id)
 	}
 }
 
-func (c *Collector) tailContainer(ctx context.Context, ci docker.ContainerInfo) {
+func (c *Collector) tailContainer(ctx context.Context, ci docker.ContainerInfo, handle *tailerHandle) {
+	defer func() {
+		c.mu.Lock()
+		if c.tailers[ci.ContainerID] == handle {
+			delete(c.tailers, ci.ContainerID)
+		}
+		c.mu.Unlock()
+	}()
+
 	deploymentID := ci.Labels["clank.deployment_id"]
-	log.Printf("[logs] Tailing container %s (deployment %s)", ci.Name, deploymentID[:8])
+	log.Printf("[logs] Tailing container %s (deployment %s)", ci.Name, shortID(deploymentID, 8))
 
 	reader, err := c.docker.ContainerLogs(ctx, ci.ContainerID, true, "0")
 	if err != nil {
@@ -151,6 +184,10 @@ func (c *Collector) tailContainer(ctx context.Context, ci docker.ContainerInfo) 
 	}
 	defer reader.Close()
 
+	c.consumeLogStream(ctx, ci, deploymentID, reader)
+}
+
+func (c *Collector) consumeLogStream(ctx context.Context, ci docker.ContainerInfo, deploymentID string, reader io.Reader) {
 	// Docker multiplexed stream format:
 	// [8-byte header][payload]
 	// Header: [stream_type(1), 0, 0, 0, size(4 big-endian)]
@@ -180,6 +217,10 @@ func (c *Collector) tailContainer(ctx context.Context, ci docker.ContainerInfo) 
 		if size == 0 {
 			continue
 		}
+		if size > maxLogFrameSize {
+			log.Printf("[logs] Dropping oversized log frame (%d bytes > %d) for %s (possibly TTY stream)", size, maxLogFrameSize, ci.Name)
+			return
+		}
 
 		// Read the payload
 		payload := make([]byte, size)
@@ -194,8 +235,9 @@ func (c *Collector) tailContainer(ctx context.Context, ci docker.ContainerInfo) 
 
 		// Parse lines from payload (may contain multiple lines)
 		scanner := bufio.NewScanner(bytes.NewReader(payload))
+		scanner.Buffer(make([]byte, 0, 64*1024), maxLogFrameSize)
 		for scanner.Scan() {
-			line := scanner.Text()
+			line := sanitizeUTF8(scanner.Text())
 			if line == "" {
 				continue
 			}
@@ -216,6 +258,9 @@ func (c *Collector) tailContainer(ctx context.Context, ci docker.ContainerInfo) 
 				c.dropped++
 				c.mu.Unlock()
 			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("[logs] Error scanning log payload for %s: %v", ci.Name, err)
 		}
 	}
 }

@@ -9,25 +9,64 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
-	"path/filepath"
+	"path"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	clankv1 "github.com/clankhost/clank-agent/gen/clank/v1"
 	"github.com/clankhost/clank-agent/internal/docker"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 const (
 	backupVolumeName       = "clank-backups"
 	alpineHelperImage      = "alpine:3.20"
 	helperImagePullTimeout = 2 * time.Minute
+	maxHelperLogBytes      = 1 << 20 // 1 MiB
 )
+
+var safeBackupSegmentRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
+
+func validateBackupSegment(field, value string) error {
+	if value == "" {
+		return fmt.Errorf("invalid %s: must not be empty", field)
+	}
+	if value == "." || value == ".." || strings.Contains(value, "..") || strings.ContainsAny(value, `/\`) {
+		return fmt.Errorf("invalid %s %q: path traversal not allowed", field, value)
+	}
+	if !safeBackupSegmentRe.MatchString(value) {
+		return fmt.Errorf("invalid %s %q: contains disallowed characters", field, value)
+	}
+	return nil
+}
+
+func validateBackupCommandIDs(cmd *clankv1.BackupCommand) error {
+	if err := validateBackupSegment("project_slug", cmd.GetProjectSlug()); err != nil {
+		return err
+	}
+	if err := validateBackupSegment("service_slug", cmd.GetServiceSlug()); err != nil {
+		return err
+	}
+	if err := validateBackupSegment("backup_id", cmd.GetBackupId()); err != nil {
+		return err
+	}
+	return nil
+}
+
+func shortID(s string, n int) string {
+	if n <= 0 || len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
 
 type dockerManager interface {
 	ImageExists(context.Context, string) (bool, error)
@@ -115,6 +154,11 @@ func (e *Executor) Execute(ctx context.Context, cmd *clankv1.BackupCommand) *cla
 		BackupId:  cmd.GetBackupId(),
 	}
 
+	if err := validateBackupCommandIDs(cmd); err != nil {
+		result.ErrorMessage = err.Error()
+		return result
+	}
+
 	// Handle delete-only cleanup
 	if cmd.GetDeleteOnly() {
 		err := e.deleteBackup(ctx, cmd)
@@ -126,7 +170,7 @@ func (e *Executor) Execute(ctx context.Context, cmd *clankv1.BackupCommand) *cla
 		return result
 	}
 
-	backupDir := filepath.Join(cmd.GetProjectSlug(), cmd.GetServiceSlug(), cmd.GetBackupId())
+	backupDir := path.Join(cmd.GetProjectSlug(), cmd.GetServiceSlug(), cmd.GetBackupId())
 	backupType := cmd.GetBackupType()
 
 	var totalSize int64
@@ -185,83 +229,28 @@ func (e *Executor) Execute(ctx context.Context, cmd *clankv1.BackupCommand) *cla
 	return result
 }
 
-// databaseBackup runs a dump command inside the running container and pipes
-// the output to a file in the clank-backups volume via an ephemeral helper.
+// databaseBackup runs a dump from an ephemeral sidecar container connected to
+// the service's network and writes directly to the clank-backups volume.
 func (e *Executor) databaseBackup(ctx context.Context, cmd *clankv1.BackupCommand, backupDir string) (int64, []string, error) {
 	containerName := cmd.GetContainerName()
 	dbType := cmd.GetDatabaseType()
-	envVars := cmd.GetEnvVars()
 
 	if containerName == "" {
 		return 0, nil, fmt.Errorf("no container name for database backup")
 	}
 
-	// Find container ID
-	containerID, _, err := e.docker.FindContainerByLabel(ctx, "clank.service_slug", cmd.GetServiceSlug())
-	if err != nil {
-		return 0, nil, fmt.Errorf("finding container: %w", err)
-	}
-
-	var dumpCmd []string
 	var outFile string
-
 	switch dbType {
-	case "postgres":
-		user := envOrDefault(envVars, "POSTGRES_USER", "postgres")
-		db := envOrDefault(envVars, "POSTGRES_DB", "postgres")
+	case "postgres", "mysql":
 		outFile = "dump.sql"
-		dumpCmd = []string{"pg_dump", "-U", user, db}
-
-	case "mysql":
-		password := envOrDefault(envVars, "MYSQL_ROOT_PASSWORD", "")
-		outFile = "dump.sql"
-		dumpCmd = []string{"mysqldump", "-u", "root", fmt.Sprintf("-p%s", password), "--all-databases"}
-
 	case "mongo":
 		outFile = "dump.archive"
-		dumpCmd = []string{"mongodump", "--archive"}
-
 	default:
 		return 0, nil, fmt.Errorf("unsupported database type: %s", dbType)
 	}
 
 	log.Printf("Running database backup for %s (%s)", cmd.GetServiceSlug(), dbType)
 
-	// Strategy: exec the dump inside the running container, then use a helper
-	// container to move it to the backup volume.
-	// Step 1: exec dump, capture output
-	exitCode, output, err := e.docker.ContainerExec(ctx, containerID, dumpCmd)
-	if err != nil {
-		return 0, nil, fmt.Errorf("exec dump: %w", err)
-	}
-	if exitCode != 0 {
-		// For mysqldump, warnings on stderr are OK if exit code is 0
-		return 0, nil, fmt.Errorf("dump exited with code %d: %s", exitCode, truncate(output, 500))
-	}
-
-	// Step 2: write output to backup volume via ephemeral container
-	shellCmd := fmt.Sprintf("mkdir -p /backups/%s && cat > /backups/%s/%s", backupDir, backupDir, outFile)
-	helperName := fmt.Sprintf("clank-backup-write-%s", cmd.GetBackupId()[:8])
-
-	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
-		Name:       helperName,
-		Command:    []string{"sh", "-c", shellCmd},
-		Entrypoint: []string{},
-		Volumes: []docker.VolumeMount{
-			{Name: backupVolumeName, MountPath: "/backups"},
-		},
-	})
-	if err != nil {
-		return 0, nil, fmt.Errorf("starting backup writer: %w", err)
-	}
-	defer func() { _ = e.docker.StopAndRemove(ctx, helperID) }()
-
-	// Pipe dump output into the helper via exec
-	// Actually, a simpler approach: run the dump and write in one go via a
-	// helper container connected to the same network
-	_ = e.docker.StopAndRemove(ctx, helperID)
-
-	// Simpler approach: run everything in one ephemeral container
 	size, err := e.runDumpViaHelper(ctx, cmd, backupDir, outFile, dbType)
 	if err != nil {
 		return 0, nil, err
@@ -275,51 +264,61 @@ func (e *Executor) databaseBackup(ctx context.Context, cmd *clankv1.BackupComman
 func (e *Executor) runDumpViaHelper(ctx context.Context, cmd *clankv1.BackupCommand, backupDir, outFile, dbType string) (int64, error) {
 	envVars := cmd.GetEnvVars()
 	serviceSlug := cmd.GetServiceSlug()
+	backupRoot := path.Join("/backups", backupDir)
+	outPath := path.Join(backupRoot, outFile)
 
-	// Determine image and dump command
+	// Determine image, env, and dump command (no shell interpolation of untrusted inputs)
 	var image string
-	var shellCmd string
+	var command []string
+	var env map[string]string
 
 	switch dbType {
 	case "postgres":
 		user := envOrDefault(envVars, "POSTGRES_USER", "postgres")
 		db := envOrDefault(envVars, "POSTGRES_DB", "postgres")
 		image = "postgres:16-alpine"
-		shellCmd = fmt.Sprintf(
-			"mkdir -p /backups/%s && PGPASSWORD='%s' pg_dump -h %s -U %s %s > /backups/%s/%s",
-			backupDir,
-			envOrDefault(envVars, "POSTGRES_PASSWORD", ""),
-			serviceSlug, user, db,
-			backupDir, outFile,
-		)
+		env = map[string]string{
+			"PGPASSWORD": envOrDefault(envVars, "POSTGRES_PASSWORD", ""),
+		}
+		command = []string{
+			`mkdir -p -- "$1" && pg_dump -h "$2" -U "$3" -- "$4" > "$5"`,
+			"--",
+			backupRoot, serviceSlug, user, db, outPath,
+		}
 
 	case "mysql":
-		password := envOrDefault(envVars, "MYSQL_ROOT_PASSWORD", "")
 		image = "mysql:8.0"
-		shellCmd = fmt.Sprintf(
-			"mkdir -p /backups/%s && mysqldump -h %s -u root -p'%s' --all-databases > /backups/%s/%s 2>/dev/null",
-			backupDir, serviceSlug, password,
-			backupDir, outFile,
-		)
+		env = map[string]string{
+			"MYSQL_PWD": envOrDefault(envVars, "MYSQL_ROOT_PASSWORD", ""),
+		}
+		command = []string{
+			`mkdir -p -- "$1" && mysqldump -h "$2" -u root --all-databases > "$3" 2>/dev/null`,
+			"--",
+			backupRoot, serviceSlug, outPath,
+		}
 
 	case "mongo":
 		image = "mongo:7"
-		shellCmd = fmt.Sprintf(
-			"mkdir -p /backups/%s && mongodump --host %s --archive=/backups/%s/%s",
-			backupDir, serviceSlug, backupDir, outFile,
-		)
+		command = []string{
+			`mkdir -p -- "$1" && mongodump --host "$2" --archive="$3"`,
+			"--",
+			backupRoot, serviceSlug, outPath,
+		}
+
+	default:
+		return 0, fmt.Errorf("unsupported database type: %s", dbType)
 	}
 
 	// Resolve project network
 	projectNetwork := fmt.Sprintf("clank-project-%s", cmd.GetProjectSlug())
-
-	helperName := fmt.Sprintf("clank-backup-%s", cmd.GetBackupId()[:8])
+	helperName := fmt.Sprintf("clank-backup-%s", shortID(cmd.GetBackupId(), 8))
 
 	helperID, err := e.docker.RunContainer(ctx, docker.RunOpts{
 		Image:      image,
 		Name:       helperName,
+		Env:        env,
 		Entrypoint: []string{"sh", "-c"},
-		Command:    []string{shellCmd},
+		Command:    command,
 		Network:    projectNetwork,
 		Volumes: []docker.VolumeMount{
 			{Name: backupVolumeName, MountPath: "/backups"},
@@ -340,7 +339,7 @@ func (e *Executor) runDumpViaHelper(ctx context.Context, cmd *clankv1.BackupComm
 	}
 
 	// Get size via a quick check
-	sizeOut, err := e.execInHelper(ctx, fmt.Sprintf("stat -c %%s /backups/%s/%s 2>/dev/null || echo 0", backupDir, outFile))
+	sizeOut, err := e.execInHelper(ctx, `stat -c %s -- "$1" 2>/dev/null || echo 0`, outPath)
 	if err != nil {
 		return 0, nil // size unknown but backup succeeded
 	}
@@ -363,8 +362,7 @@ func (e *Executor) volumeBackup(ctx context.Context, cmd *clankv1.BackupCommand,
 	var tarPaths []string
 	var files []string
 
-	// Mount backup volume + all service volumes (read-only flag not directly
-	// supported in RunOpts, but we only read from them)
+	// Mount backup volume + all service volumes
 	mounts = append(mounts, docker.VolumeMount{Name: backupVolumeName, MountPath: "/backups"})
 	for i, vm := range volumeMounts {
 		srcPath := fmt.Sprintf("/src%d", i)
@@ -376,20 +374,26 @@ func (e *Executor) volumeBackup(ctx context.Context, cmd *clankv1.BackupCommand,
 		files = append(files, tarName)
 	}
 
-	// Build tar commands for each volume
-	var cmds []string
-	cmds = append(cmds, fmt.Sprintf("mkdir -p /backups/%s", backupDir))
-	for i, srcPath := range tarPaths {
-		tarName := files[i]
-		cmds = append(cmds, fmt.Sprintf("tar czf /backups/%s/%s -C %s .", backupDir, tarName, srcPath))
-	}
-	shellCmd := strings.Join(cmds, " && ")
+	backupRoot := path.Join("/backups", backupDir)
+	script := `set -e
+backup_dir="$1"
+shift
+mkdir -p -- "$backup_dir"
+i=0
+for src in "$@"; do
+  tar czf "$backup_dir/volume_${i}.tar.gz" -C "$src" .
+  i=$((i + 1))
+done`
 
-	helperName := fmt.Sprintf("clank-backup-vol-%s", cmd.GetBackupId()[:8])
+	command := make([]string, 0, 3+len(tarPaths))
+	command = append(command, script, "--", backupRoot)
+	command = append(command, tarPaths...)
+
+	helperName := fmt.Sprintf("clank-backup-vol-%s", shortID(cmd.GetBackupId(), 8))
 	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
-		Command:    []string{shellCmd},
+		Command:    command,
 		Volumes:    mounts,
 	})
 	if err != nil {
@@ -406,8 +410,7 @@ func (e *Executor) volumeBackup(ctx context.Context, cmd *clankv1.BackupCommand,
 	}
 
 	// Get total size
-	sizeCmd := fmt.Sprintf("du -sb /backups/%s/ | cut -f1", backupDir)
-	sizeOut, err := e.execInHelper(ctx, sizeCmd)
+	sizeOut, err := e.execInHelper(ctx, `du -sb -- "$1" | cut -f1`, backupRoot+"/")
 	var totalSize int64
 	if err == nil {
 		fmt.Sscanf(strings.TrimSpace(sizeOut), "%d", &totalSize)
@@ -434,15 +437,14 @@ func (e *Executor) writeMetadata(ctx context.Context, cmd *clankv1.BackupCommand
 		return
 	}
 
-	shellCmd := fmt.Sprintf("cat > /backups/%s/metadata.json", backupDir)
-	helperName := fmt.Sprintf("clank-backup-meta-%s", cmd.GetBackupId()[:8])
+	backupRoot := path.Join("/backups", backupDir)
+	helperName := fmt.Sprintf("clank-backup-meta-%s", shortID(cmd.GetBackupId(), 8))
 
-	// Write via echo in a helper container
-	writeCmd := fmt.Sprintf("echo '%s' > /backups/%s/metadata.json", string(metaJSON), backupDir)
 	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
+		Env:        map[string]string{"CLANK_BACKUP_META": string(metaJSON)},
 		Entrypoint: []string{"sh", "-c"},
-		Command:    []string{writeCmd},
+		Command:    []string{`mkdir -p -- "$1" && printf '%s\n' "$CLANK_BACKUP_META" > "$1/metadata.json"`, "--", backupRoot},
 		Volumes: []docker.VolumeMount{
 			{Name: backupVolumeName, MountPath: "/backups"},
 		},
@@ -451,21 +453,22 @@ func (e *Executor) writeMetadata(ctx context.Context, cmd *clankv1.BackupCommand
 		log.Printf("Failed to write backup metadata: %v", err)
 		return
 	}
-	_ = shellCmd // unused, using writeCmd instead
-	e.docker.WaitContainer(ctx, helperID)
-	_ = e.docker.StopAndRemove(ctx, helperID)
+	defer func() { _ = e.docker.StopAndRemove(ctx, helperID) }()
+	_, _ = e.docker.WaitContainer(ctx, helperID)
 }
 
 // deleteBackup removes a backup directory from the backup volume.
 func (e *Executor) deleteBackup(ctx context.Context, cmd *clankv1.BackupCommand) error {
-	backupDir := filepath.Join(cmd.GetProjectSlug(), cmd.GetServiceSlug(), cmd.GetBackupId())
-	shellCmd := fmt.Sprintf("rm -rf /backups/%s", backupDir)
+	if err := validateBackupCommandIDs(cmd); err != nil {
+		return err
+	}
+	backupRoot := path.Join("/backups", cmd.GetProjectSlug(), cmd.GetServiceSlug(), cmd.GetBackupId())
 
-	helperName := fmt.Sprintf("clank-backup-del-%s", cmd.GetBackupId()[:8])
+	helperName := fmt.Sprintf("clank-backup-del-%s", shortID(cmd.GetBackupId(), 8))
 	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
-		Command:    []string{shellCmd},
+		Command:    []string{`rm -rf -- "$1"`, "--", backupRoot},
 		Volumes: []docker.VolumeMount{
 			{Name: backupVolumeName, MountPath: "/backups"},
 		},
@@ -488,15 +491,15 @@ func (e *Executor) deleteBackup(ctx context.Context, cmd *clankv1.BackupCommand)
 
 // enforceRetention prunes old backups beyond the retention count.
 func (e *Executor) enforceRetention(ctx context.Context, cmd *clankv1.BackupCommand) {
-	serviceDir := filepath.Join(cmd.GetProjectSlug(), cmd.GetServiceSlug())
+	serviceDir := path.Join(cmd.GetProjectSlug(), cmd.GetServiceSlug())
+	serviceRoot := path.Join("/backups", serviceDir)
 	retention := int(cmd.GetRetentionCount())
 	if retention < 1 {
 		retention = 5
 	}
 
 	// List backup directories sorted by name (which includes the backup ID)
-	listCmd := fmt.Sprintf("ls -1 /backups/%s/ 2>/dev/null || true", serviceDir)
-	output, err := e.execInHelper(ctx, listCmd)
+	output, err := e.execInHelper(ctx, `ls -1 -- "$1" 2>/dev/null || true`, serviceRoot)
 	if err != nil {
 		return
 	}
@@ -512,20 +515,28 @@ func (e *Executor) enforceRetention(ctx context.Context, cmd *clankv1.BackupComm
 	// Delete the oldest ones
 	toDelete := len(dirs) - retention
 	for i := 0; i < toDelete; i++ {
-		delCmd := fmt.Sprintf("rm -rf /backups/%s/%s", serviceDir, dirs[i])
+		if err := validateBackupSegment("retention_dir", dirs[i]); err != nil {
+			log.Printf("Retention prune: skipping unsafe directory entry %q: %v", dirs[i], err)
+			continue
+		}
+		targetPath := path.Join(serviceRoot, dirs[i])
 		log.Printf("Retention prune: deleting backup dir %s/%s", serviceDir, dirs[i])
-		e.execInHelper(ctx, delCmd)
+		_, _ = e.execInHelper(ctx, `rm -rf -- "$1"`, targetPath)
 	}
 }
 
 // execInHelper runs a shell command in an ephemeral alpine container with
-// the backup volume mounted. Returns the command output.
-func (e *Executor) execInHelper(ctx context.Context, shellCmd string) (string, error) {
+// the backup volume mounted. Returns the demuxed stdout output.
+func (e *Executor) execInHelper(ctx context.Context, shellCmd string, args ...string) (string, error) {
 	helperName := fmt.Sprintf("clank-backup-helper-%d", time.Now().UnixNano()%100000)
+	command := make([]string, 0, 2+len(args))
+	command = append(command, shellCmd, "--")
+	command = append(command, args...)
+
 	helperID, err := e.runAlpineHelper(ctx, docker.RunOpts{
 		Name:       helperName,
 		Entrypoint: []string{"sh", "-c"},
-		Command:    []string{shellCmd},
+		Command:    command,
 		Volumes: []docker.VolumeMount{
 			{Name: backupVolumeName, MountPath: "/backups"},
 		},
@@ -535,18 +546,20 @@ func (e *Executor) execInHelper(ctx context.Context, shellCmd string) (string, e
 	}
 	defer func() { _ = e.docker.StopAndRemove(ctx, helperID) }()
 
-	e.docker.WaitContainer(ctx, helperID)
+	_, _ = e.docker.WaitContainer(ctx, helperID)
 
-	// Read logs for output
+	// Read and demux Docker multiplexed stdout/stderr logs
 	reader, err := e.docker.ContainerLogs(ctx, helperID, false, "all")
 	if err != nil {
 		return "", err
 	}
 	defer reader.Close()
 
-	buf := make([]byte, 64*1024)
-	n, _ := reader.Read(buf)
-	return string(buf[:n]), nil
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, io.LimitReader(reader, maxHelperLogBytes)); err != nil {
+		return "", fmt.Errorf("demuxing helper logs: %w", err)
+	}
+	return stdout.String(), nil
 }
 
 // envOrDefault returns the value for key from the map, or the fallback.

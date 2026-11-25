@@ -4,18 +4,57 @@ package selfupdate
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+const (
+	// maxDownloadBytes caps downloaded update archives and extracted binaries
+	// to prevent disk/memory exhaustion from a malicious or misconfigured server.
+	maxDownloadBytes = 256 * 1024 * 1024 // 256 MiB
+)
+
+// execPathResolver can be overridden in tests to avoid mutating the test binary.
+var execPathResolver = resolveExecPath
+
+// validateDownloadURL enforces HTTPS for update downloads, allowing plaintext
+// HTTP only for loopback addresses (used by local tests).
+func validateDownloadURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid download URL %q: %w", rawURL, err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid download URL %q: missing host", rawURL)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := strings.ToLower(u.Hostname())
+		if host == "localhost" {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("download URL must use HTTPS (got %q)", rawURL)
+	default:
+		return fmt.Errorf("unsupported download URL scheme %q", u.Scheme)
+	}
+}
 
 // PhaseError wraps an error with the update phase where it occurred.
 type PhaseError struct {
@@ -81,7 +120,7 @@ func isDowngrade(currentVersion, newVersion string) bool {
 // the config directory, which may reside in a read-only home directory
 // (ProtectHome=read-only).
 func BinDir() string {
-	execPath, err := resolveExecPath()
+	execPath, err := execPathResolver()
 	if err != nil {
 		return os.TempDir()
 	}
@@ -130,6 +169,11 @@ func resolveExecPath() (string, error) {
 // attacks where a compromised control plane serves a malicious binary with
 // a matching checksum.
 func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
+	return ApplyContext(context.Background(), downloadURL, expectedSHA256, signature, currentVersion, newVersion)
+}
+
+// ApplyContext is like Apply but honors ctx cancellation during download.
+func ApplyContext(ctx context.Context, downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -145,10 +189,15 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 		}
 	}
 
+	// Enforce HTTPS (allowing loopback HTTP only for local tests)
+	if err := validateDownloadURL(downloadURL); err != nil {
+		return &PhaseError{Phase: "download", Err: err}
+	}
+
 	log.Printf("[update] Updating from %s to %s", currentVersion, newVersion)
 
 	// 1. Determine current binary path
-	execPath, err := resolveExecPath()
+	execPath, err := execPathResolver()
 	if err != nil {
 		return &PhaseError{Phase: "replace", Err: fmt.Errorf("resolving executable path: %w", err)}
 	}
@@ -162,7 +211,7 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 	defer os.RemoveAll(tmpDir)
 
 	archivePath := filepath.Join(tmpDir, "archive.tar.gz")
-	if err := downloadFile(downloadURL, archivePath); err != nil {
+	if err := downloadFile(ctx, downloadURL, archivePath); err != nil {
 		return &PhaseError{Phase: "download", Err: fmt.Errorf("downloading archive: %w", err)}
 	}
 
@@ -238,6 +287,11 @@ func Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion st
 // backup in the config directory, which could be read-only when the config
 // lives under $HOME with ProtectHome=read-only.
 func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
+	return BackupAndApplyContext(context.Background(), downloadURL, expectedSHA256, signature, currentVersion, newVersion)
+}
+
+// BackupAndApplyContext is like BackupAndApply but honors ctx cancellation.
+func BackupAndApplyContext(ctx context.Context, downloadURL, expectedSHA256, signature, currentVersion, newVersion string) error {
 	if currentVersion == newVersion {
 		log.Printf("[update] Already running version %s, skipping", currentVersion)
 		return nil
@@ -252,7 +306,7 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 		}
 	}
 
-	execPath, err := resolveExecPath()
+	execPath, err := execPathResolver()
 	if err != nil {
 		return &PhaseError{Phase: "backup", Err: fmt.Errorf("resolving executable path: %w", err)}
 	}
@@ -270,7 +324,7 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 	}
 
 	// Apply the update
-	if err := Apply(downloadURL, expectedSHA256, signature, currentVersion, newVersion); err != nil {
+	if err := ApplyContext(ctx, downloadURL, expectedSHA256, signature, currentVersion, newVersion); err != nil {
 		// Restore backup on failure using rename-based replacement
 		log.Printf("[update] Apply failed, restoring backup: %v", err)
 		if restoreErr := replaceFile(backupPath, execPath); restoreErr != nil {
@@ -285,7 +339,7 @@ func BackupAndApply(downloadURL, expectedSHA256, signature, currentVersion, newV
 // Rollback restores the previous binary from the backup next to the current binary.
 // Returns an error if no backup exists.
 func Rollback() error {
-	execPath, err := resolveExecPath()
+	execPath, err := execPathResolver()
 	if err != nil {
 		return fmt.Errorf("resolving executable path: %w", err)
 	}
@@ -310,23 +364,47 @@ func CleanupBackup() {
 	os.Remove(backupPath)
 }
 
-func downloadFile(url, dest string) error {
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Get(url)
+func downloadFile(ctx context.Context, rawURL, dest string) error {
+	if err := validateDownloadURL(rawURL); err != nil {
+		return err
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			return validateDownloadURL(req.URL.String())
+		},
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, url)
+		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, rawURL)
 	}
 	f, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxDownloadBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > maxDownloadBytes {
+		return fmt.Errorf("download exceeds maximum allowed size (%d bytes)", maxDownloadBytes)
+	}
+	return nil
 }
 
 func fileSHA256(path string) (string, error) {
@@ -372,11 +450,16 @@ func extractBinary(archivePath, destPath string) error {
 			if err != nil {
 				return err
 			}
-			if _, err := io.Copy(out, tr); err != nil {
+			n, err := io.Copy(out, io.LimitReader(tr, maxDownloadBytes+1))
+			if err != nil {
 				out.Close()
 				return err
 			}
 			out.Close()
+			if n > maxDownloadBytes {
+				os.Remove(destPath)
+				return fmt.Errorf("extracted binary exceeds maximum allowed size (%d bytes)", maxDownloadBytes)
+			}
 			return nil
 		}
 	}

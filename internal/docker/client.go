@@ -2,16 +2,20 @@ package docker
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	dockertypes "github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/build"
@@ -655,15 +659,31 @@ func (m *Manager) ContainerExec(ctx context.Context, containerID string, cmd []s
 // WaitContainer blocks until a container stops and returns its exit code.
 func (m *Manager) WaitContainer(ctx context.Context, containerID string) (int64, error) {
 	statusCh, errCh := m.cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)
-	select {
-	case err := <-errCh:
-		if err != nil {
-			return -1, err
+	return waitContainerChannels(ctx, statusCh, errCh)
+}
+
+func waitContainerChannels(ctx context.Context, statusCh <-chan container.WaitResponse, errCh <-chan error) (int64, error) {
+	for statusCh != nil || errCh != nil {
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			if err != nil {
+				return -1, err
+			}
+		case status, ok := <-statusCh:
+			if !ok {
+				statusCh = nil
+				continue
+			}
+			return status.StatusCode, nil
 		}
-	case status := <-statusCh:
-		return status.StatusCode, nil
 	}
-	return 0, nil
+	return -1, fmt.Errorf("container wait channels closed without status")
 }
 
 // DetectDockerSocket returns the Docker socket URI for the current platform.
@@ -695,7 +715,9 @@ func DetectDockerSocket() string {
 // Returns true and the Docker version string on success,
 // or false and an error description on failure.
 func IsDockerAvailable() (bool, string) {
-	out, err := exec.Command("docker", "version", "--format", "{{.Server.Version}}").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Output()
 	if err != nil {
 		return false, fmt.Sprintf("docker not reachable: %v", err)
 	}
@@ -791,6 +813,23 @@ func IsValidMountPath(path string) bool {
 	return true
 }
 
+// safeImgUserRe allows valid POSIX user[:group] or numeric uid[:gid] specs
+// without leading dashes or shell metacharacters.
+var safeImgUserRe = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]*(:[a-zA-Z0-9_][a-zA-Z0-9._-]*)?$`)
+
+// IsValidImageUser checks whether user is a safe POSIX user/uid[:group/gid] specification.
+func IsValidImageUser(user string) bool {
+	return user != "" && len(user) <= 128 && safeImgUserRe.MatchString(user)
+}
+
+func uniqueInitContainerName() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return fmt.Sprintf("clank-vol-init-%d-%s", os.Getpid(), hex.EncodeToString(b[:]))
+	}
+	return fmt.Sprintf("clank-vol-init-%d-%d", os.Getpid(), time.Now().UnixNano())
+}
+
 // EnsureVolumeOwnership runs an ephemeral init container to chown volume
 // mount paths to the image's default user. This prevents permission errors
 // when Docker creates volumes as root but the image runs as a non-root user.
@@ -811,11 +850,17 @@ func (m *Manager) EnsureVolumeOwnership(ctx context.Context, imageName string, v
 	if imgUser == "" || imgUser == "root" || imgUser == "0" || imgUser == "0:0" {
 		return nil // root user — no chown needed
 	}
+	if !IsValidImageUser(imgUser) {
+		return fmt.Errorf("invalid image user %q for volume ownership", imgUser)
+	}
 
 	// Build volume mounts for the init container
 	var initMounts []mount.Mount
 	var mountPaths []string
 	for _, vol := range volumes {
+		if !IsValidMountPath(vol.MountPath) {
+			return fmt.Errorf("invalid volume mount path %q for volume ownership", vol.MountPath)
+		}
 		initMounts = append(initMounts, mount.Mount{
 			Type:   mount.TypeVolume,
 			Source: vol.Name,
@@ -824,12 +869,15 @@ func (m *Manager) EnsureVolumeOwnership(ctx context.Context, imageName string, v
 		mountPaths = append(mountPaths, vol.MountPath)
 	}
 
-	chownCmd := fmt.Sprintf("chown -R %s %s", imgUser, strings.Join(mountPaths, " "))
-	initName := fmt.Sprintf("clank-vol-init-%d", os.Getpid())
+	cmd := make([]string, 0, 3+len(mountPaths))
+	cmd = append(cmd, `user="$1"; shift; chown -R -- "$user" "$@"`, "--", imgUser)
+	cmd = append(cmd, mountPaths...)
+	initName := uniqueInitContainerName()
 
 	resp, err := m.cli.ContainerCreate(ctx, &container.Config{
 		Image:      imageName,
-		Entrypoint: []string{"/bin/sh", "-c", chownCmd},
+		Entrypoint: []string{"/bin/sh", "-c"},
+		Cmd:        cmd,
 		User:       "root",
 	}, &container.HostConfig{
 		Mounts: initMounts,
@@ -838,28 +886,29 @@ func (m *Manager) EnsureVolumeOwnership(ctx context.Context, imageName string, v
 		fmt.Printf("Warning: failed to create volume init container: %v\n", err)
 		return nil
 	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cleanupCancel()
+		_ = m.cli.ContainerRemove(cleanupCtx, resp.ID, container.RemoveOptions{Force: true})
+	}()
 
 	if err := m.cli.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		_ = m.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		fmt.Printf("Warning: failed to start volume init container: %v\n", err)
 		return nil
 	}
 
-	// Wait for the init container to finish
+	// Wait for the init container to finish, honoring ctx cancellation
 	statusCh, errCh := m.cli.ContainerWait(ctx, resp.ID, container.WaitConditionNotRunning)
-	select {
-	case err := <-errCh:
-		if err != nil {
-			fmt.Printf("Warning: volume init container error: %v\n", err)
+	exitCode, waitErr := waitContainerChannels(ctx, statusCh, errCh)
+	if waitErr != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-	case status := <-statusCh:
-		if status.StatusCode != 0 {
-			fmt.Printf("Warning: volume init container exited with code %d\n", status.StatusCode)
-		}
+		fmt.Printf("Warning: volume init container error: %v\n", waitErr)
+	} else if exitCode != 0 {
+		fmt.Printf("Warning: volume init container exited with code %d\n", exitCode)
 	}
 
-	// Remove the init container
-	_ = m.cli.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 	fmt.Printf("Volume ownership fixed for user %s on %d mount(s)\n", imgUser, len(volumes))
 	return nil
 }
