@@ -510,8 +510,8 @@ func (h *CommandHandler) HandleDeploy(ctx context.Context, stream grpcclient.Con
 		buildLog("WARNING: Docker disk guard would have blocked this deploy, but --force was set so deployment is continuing.")
 	}
 
-	// Phase 1: Build (if repo_url is set)
-	if cmd.GetRepoUrl() != "" {
+	// Phase 1: Build (only when repo_url is set and no pre-built image_tag was provided)
+	if cmd.GetRepoUrl() != "" && imageTag == "" {
 		sendProgress("cloning", fmt.Sprintf("Cloning %s...", cmd.GetRepoUrl()), "", "", "", "")
 
 		result, err := h.builder.BuildFromSource(ctx, build.BuildOpts{

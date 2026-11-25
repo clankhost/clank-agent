@@ -264,6 +264,25 @@ func (b *Builder) detectBuildKit(ctx context.Context) (buildBackend, string) {
 	return defaultDetectBuildKit(ctx)
 }
 
+// buildKitEnv returns an environment slice with DOCKER_BUILDKIT=1 and a
+// writable DOCKER_CONFIG directory (avoiding ProtectHome=read-only failures
+// when `docker buildx` writes activity metadata under $HOME/.docker/buildx).
+func buildKitEnv() []string {
+	cfgDir := filepath.Join(os.TempDir(), "clank-docker-config")
+	_ = os.MkdirAll(cfgDir, 0o700)
+
+	base := os.Environ()
+	env := make([]string, 0, len(base)+2)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, "DOCKER_CONFIG=") || strings.HasPrefix(kv, "DOCKER_BUILDKIT=") {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env, "DOCKER_BUILDKIT=1", "DOCKER_CONFIG="+cfgDir)
+	return env
+}
+
 func defaultDetectBuildKit(ctx context.Context) (buildBackend, string) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return buildBackendLegacy, "docker CLI not found in PATH"
@@ -271,14 +290,19 @@ func defaultDetectBuildKit(ctx context.Context) (buildBackend, string) {
 
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+	env := buildKitEnv()
 
 	// Prefer `docker buildx build --load` (standard BuildKit frontend with persistent cache).
-	if err := exec.CommandContext(probeCtx, "docker", "buildx", "version").Run(); err == nil {
+	probeBuildx := exec.CommandContext(probeCtx, "docker", "buildx", "version")
+	probeBuildx.Env = env
+	if err := probeBuildx.Run(); err == nil {
 		return buildBackendBuildx, ""
 	}
 
 	// Fallback to `DOCKER_BUILDKIT=1 docker build` if docker CLI is functional.
-	if err := exec.CommandContext(probeCtx, "docker", "version", "--format", "{{.Server.Version}}").Run(); err == nil {
+	probeDocker := exec.CommandContext(probeCtx, "docker", "version", "--format", "{{.Server.Version}}")
+	probeDocker.Env = env
+	if err := probeDocker.Run(); err == nil {
 		return buildBackendBuildKitCLI, ""
 	}
 
@@ -353,7 +377,7 @@ func buildKitCommandArgs(backend buildBackend, req buildRequest) []string {
 func defaultRunBuildKit(ctx context.Context, backend buildBackend, req buildRequest, onLog func(string)) error {
 	args := buildKitCommandArgs(backend, req)
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
+	cmd.Env = buildKitEnv()
 
 	logWriter := newLineLogWriter(onLog)
 	cmd.Stdout = logWriter
