@@ -698,13 +698,24 @@ func buildIntrospectionProto(result *deploy.DeployResult) *clankv1.ContainerIntr
 	return intro
 }
 
-// HandleContainerCommand processes a ContainerCommand (stop/start/restart/remove).
+const (
+	containerActionExec     = clankv1.ContainerCommand_Action(4)
+	containerExecTimeout    = 60 * time.Second
+	containerExecMaxOutSize = 256 * 1024
+)
+
+// HandleContainerCommand processes a ContainerCommand (stop/start/restart/remove/exec).
 func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.ContainerCommand) {
 	commandID := cmd.GetCommandId()
 	containerName := cmd.GetContainerName()
 	action := cmd.GetAction()
 
 	log.Printf("Handling container command %s: %s on %s", commandID, action, containerName)
+
+	if action == containerActionExec {
+		h.handleContainerExec(ctx, stream, cmd)
+		return
+	}
 
 	// Find container by name
 	containerID, _, err := h.docker.FindContainerByLabel(ctx, "clank.managed", "true")
@@ -772,6 +783,83 @@ func (h *CommandHandler) HandleContainerCommand(ctx context.Context, stream grpc
 	if err := stream.Send(msg); err != nil {
 		log.Printf("Failed to send command result: %v", err)
 	}
+}
+
+func (h *CommandHandler) handleContainerExec(ctx context.Context, stream grpcclient.ConnectStream, cmd *clankv1.ContainerCommand) {
+	commandID := cmd.GetCommandId()
+
+	sendResult := func(success bool, output string) {
+		msg := &clankv1.AgentMessage{
+			Payload: &clankv1.AgentMessage_CommandResult{
+				CommandResult: &clankv1.CommandResult{
+					CommandId: commandID,
+					Success:   success,
+					Output:    sanitizeUTF8(output),
+				},
+			},
+		}
+		if err := stream.Send(msg); err != nil {
+			log.Printf("Failed to send command result: %v", err)
+		}
+	}
+
+	argv := cmd.GetVolumeNames()
+	if len(argv) == 0 {
+		log.Printf("Container exec command %s rejected: empty argv", commandID)
+		sendResult(false, "exec command requires non-empty argv")
+		return
+	}
+
+	target := cmd.GetContainerName()
+	if target == "" {
+		slug := cmd.GetServiceSlug()
+		if slug == "" {
+			sendResult(false, "exec command requires container_name or service_slug")
+			return
+		}
+		id, _, err := h.docker.FindContainerByLabel(ctx, "clank.service_slug", slug)
+		if err != nil {
+			log.Printf("Container exec command %s failed finding container for %s: %v", commandID, slug, err)
+			sendResult(false, fmt.Sprintf("finding container for service %s: %v", slug, err))
+			return
+		}
+		if id == "" {
+			sendResult(false, fmt.Sprintf("no running container found for service %s", slug))
+			return
+		}
+		target = id
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, containerExecTimeout)
+	defer cancel()
+
+	res, err := h.docker.ExecInContainer(execCtx, target, argv, containerExecMaxOutSize)
+	if err != nil {
+		log.Printf("Container exec command %s failed on %s: %v", commandID, target, err)
+		sendResult(false, err.Error())
+		return
+	}
+
+	payload := struct {
+		ExitCode  int    `json:"exit_code"`
+		Stdout    string `json:"stdout"`
+		Stderr    string `json:"stderr"`
+		Truncated bool   `json:"truncated"`
+	}{
+		ExitCode:  res.ExitCode,
+		Stdout:    sanitizeUTF8(res.Stdout),
+		Stderr:    sanitizeUTF8(res.Stderr),
+		Truncated: res.Truncated,
+	}
+	outBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("Container exec command %s failed marshaling result: %v", commandID, err)
+		sendResult(false, fmt.Sprintf("marshaling exec result: %v", err))
+		return
+	}
+
+	log.Printf("Container exec command %s completed on %s (exit_code=%d, truncated=%v)", commandID, target, res.ExitCode, res.Truncated)
+	sendResult(true, string(outBytes))
 }
 
 // removeServiceContainers stops and removes all containers for a service slug,

@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -27,6 +28,7 @@ import (
 	"github.com/docker/docker/api/types/registry"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	goarchive "github.com/moby/go-archive"
 	"github.com/shirou/gopsutil/v4/disk"
@@ -49,6 +51,11 @@ func NewManager() (*Manager, error) {
 		return nil, fmt.Errorf("creating docker client: %w", err)
 	}
 	return &Manager{cli: cli}, nil
+}
+
+// NewManagerWithClient wraps an existing Docker Engine API client.
+func NewManagerWithClient(cli *client.Client) *Manager {
+	return &Manager{cli: cli}
 }
 
 // RegistryAuth holds credentials for authenticating with a Docker registry.
@@ -447,6 +454,30 @@ func (m *Manager) FindContainerByLabel(ctx context.Context, key, value string) (
 	return c.ID, name, nil
 }
 
+// FindAllContainersByLabel returns all containers (running and stopped) with the given label key=value.
+func (m *Manager) FindAllContainersByLabel(ctx context.Context, key, value string) ([]ContainerRef, error) {
+	containers, err := m.cli.ContainerList(ctx, container.ListOptions{
+		All:     true,
+		Filters: filters.NewArgs(filters.Arg("label", key+"="+value)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing containers by label %s=%s: %w", key, value, err)
+	}
+	result := make([]ContainerRef, 0, len(containers))
+	for _, c := range containers {
+		name := ""
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
+		result = append(result, ContainerRef{
+			ID:    c.ID,
+			Name:  name,
+			State: c.State,
+		})
+	}
+	return result, nil
+}
+
 // FindContainerByName finds a container by exact name (including stopped).
 // Returns the container ID and name, or empty strings if not found.
 func (m *Manager) FindContainerByName(ctx context.Context, name string) (string, string, error) {
@@ -695,6 +726,101 @@ func (m *Manager) ContainerExec(ctx context.Context, containerID string, cmd []s
 	}
 
 	return inspect.ExitCode, string(output), nil
+}
+
+type boundedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	total := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		if total > 0 {
+			b.truncated = true
+		}
+		return total, nil
+	}
+	if total > remaining {
+		b.buf.Write(p[:remaining])
+		b.truncated = true
+		return total, nil
+	}
+	b.buf.Write(p)
+	return total, nil
+}
+
+const defaultExecMaxOutputBytes = 256 * 1024
+
+// ExecInContainer runs cmd inside a Clank-managed container, returning demultiplexed
+// stdout/stderr capped at maxOutputBytes each and the exact process exit code.
+func (m *Manager) ExecInContainer(ctx context.Context, containerNameOrID string, cmd []string, maxOutputBytes int) (*ExecResult, error) {
+	if containerNameOrID == "" {
+		return nil, fmt.Errorf("container name or ID is required")
+	}
+	if len(cmd) == 0 {
+		return nil, fmt.Errorf("exec command cannot be empty")
+	}
+	if maxOutputBytes <= 0 {
+		maxOutputBytes = defaultExecMaxOutputBytes
+	}
+
+	inspect, err := m.cli.ContainerInspect(ctx, containerNameOrID)
+	if err != nil {
+		return nil, fmt.Errorf("inspecting container %s: %w", containerNameOrID, err)
+	}
+	if inspect.Config == nil || inspect.Config.Labels["clank.managed"] != "true" {
+		return nil, fmt.Errorf("refusing to exec in unmanaged container %s: missing clank.managed=true label", containerNameOrID)
+	}
+
+	execResp, err := m.cli.ContainerExecCreate(ctx, inspect.ID, container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating exec: %w", err)
+	}
+
+	hijack, err := m.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("attaching exec: %w", err)
+	}
+	defer hijack.Close()
+
+	stdoutBuf := &boundedBuffer{limit: maxOutputBytes}
+	stderrBuf := &boundedBuffer{limit: maxOutputBytes}
+
+	copyDone := make(chan error, 1)
+	go func() {
+		_, copyErr := stdcopy.StdCopy(stdoutBuf, stderrBuf, hijack.Reader)
+		copyDone <- copyErr
+	}()
+
+	select {
+	case <-ctx.Done():
+		hijack.Close()
+		<-copyDone
+		return nil, fmt.Errorf("exec cancelled: %w", ctx.Err())
+	case copyErr := <-copyDone:
+		if copyErr != nil && copyErr != io.EOF {
+			return nil, fmt.Errorf("reading exec output: %w", copyErr)
+		}
+	}
+
+	execInspect, err := m.cli.ContainerExecInspect(ctx, execResp.ID)
+	if err != nil {
+		return nil, fmt.Errorf("inspecting exec: %w", err)
+	}
+
+	return &ExecResult{
+		ExitCode:  execInspect.ExitCode,
+		Stdout:    stdoutBuf.buf.String(),
+		Stderr:    stderrBuf.buf.String(),
+		Truncated: stdoutBuf.truncated || stderrBuf.truncated,
+	}, nil
 }
 
 // WaitContainer blocks until a container stops and returns its exit code.

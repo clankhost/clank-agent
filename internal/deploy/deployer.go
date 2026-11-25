@@ -136,15 +136,41 @@ const platformDefaultPort = 8080
 // ProgressFunc is a callback for reporting deploy progress.
 type ProgressFunc func(status, message, containerID, containerName string)
 
+// DockerClient defines the Docker operations required by Deployer.
+type DockerClient interface {
+	EnsureNetwork(ctx context.Context, name string) error
+	FindContainerByLabel(ctx context.Context, key, value string) (string, string, error)
+	FindAllContainersByLabel(ctx context.Context, key, value string) ([]docker.ContainerRef, error)
+	FindContainerByName(ctx context.Context, name string) (string, string, error)
+	FindTraefikContainer(ctx context.Context) string
+	ConnectToNetworkIfNeeded(ctx context.Context, containerID, networkName string) error
+	PullImage(ctx context.Context, img string, auth *docker.RegistryAuth, onLog func(string)) error
+	InspectImage(ctx context.Context, imageRef string) (*docker.ImageMeta, error)
+	GetImageDigest(ctx context.Context, imageRef string) (string, error)
+	EnsureVolumeOwnership(ctx context.Context, imageRef string, volumes []docker.VolumeMount) error
+	RunContainer(ctx context.Context, opts docker.RunOpts) (string, error)
+	InspectContainer(ctx context.Context, containerID string) (*docker.ContainerInspection, error)
+	GetContainerIP(ctx context.Context, containerID, networkName string) (string, error)
+	GetHealthStatus(ctx context.Context, containerID string) string
+	GetStartupLogs(ctx context.Context, containerID string, tailLines int) (string, error)
+	StopAndRemove(ctx context.Context, containerID string) error
+}
+
+var _ DockerClient = (*docker.Manager)(nil)
+
 // Deployer handles container deployment on the agent host.
 type Deployer struct {
-	docker *docker.Manager
+	docker DockerClient
 
 	// Traefik-ready cutover probe configuration (zero values use production defaults).
 	traefikEndpoint     string
 	traefikReadyTimeout time.Duration
 	traefikPollInterval time.Duration
 	traefikHTTPClient   *http.Client
+
+	// Optional test overrides for startup/cutover waits (zero = 2s default, negative = skip).
+	crashCheckDelay time.Duration
+	cutoverDelay    time.Duration
 }
 
 const (
@@ -155,7 +181,11 @@ const (
 
 // NewDeployer creates a Deployer with the given Docker manager.
 func NewDeployer(dm *docker.Manager) *Deployer {
-	return &Deployer{docker: dm}
+	var dc DockerClient
+	if dm != nil {
+		dc = dm
+	}
+	return &Deployer{docker: dc}
 }
 
 // EndpointInfo mirrors the proto EndpointInfo for deploy-time label generation.
@@ -274,6 +304,32 @@ func shouldBlueGreen(opts DeployOpts) bool {
 	return opts.HealthConfig.Path != "" && len(opts.Volumes) == 0
 }
 
+// sweepStaleContainers stops and removes all containers matching
+// clank.service_slug=<serviceSlug> except keepContainerID (when non-empty).
+// Returns the number of stale containers removed.
+func (d *Deployer) sweepStaleContainers(ctx context.Context, serviceSlug, keepContainerID string) int {
+	containers, err := d.docker.FindAllContainersByLabel(ctx, "clank.service_slug", serviceSlug)
+	if err != nil {
+		log.Printf("Warning: could not list containers for stale cleanup (%s): %v", serviceSlug, err)
+		return 0
+	}
+
+	removed := 0
+	for _, c := range containers {
+		if keepContainerID != "" && c.ID == keepContainerID {
+			continue
+		}
+		log.Printf("Stopping stale container %s (%s) for service %s", c.Name, shortID(c.ID, 12), serviceSlug)
+		if stopErr := d.docker.StopAndRemove(ctx, c.ID); stopErr != nil {
+			log.Printf("Warning: failed to remove stale container %s (%s): %v", c.Name, shortID(c.ID, 12), stopErr)
+			continue
+		}
+		removed++
+	}
+	log.Printf("Cleaned up %d stale container(s) for service %s", removed, serviceSlug)
+	return removed
+}
+
 // Deploy starts a container with Traefik labels and runs health checks.
 // Returns a DeployResult (always non-nil, even on error) and an error.
 func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress ProgressFunc) (*DeployResult, error) {
@@ -290,26 +346,32 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 		return result, fmt.Errorf("ensuring network: %w", err)
 	}
 
-	// Find old container for this service slug (if any).
-	// Blue-green: keep old running until new passes health checks.
-	// Recreate: stop old immediately (databases, volumes, no health path).
-	oldID, oldName, err := d.docker.FindContainerByLabel(ctx, "clank.service_slug", opts.ServiceSlug)
+	// Find all existing containers for this service slug (running and stopped).
+	// Blue-green: keep old containers running until new passes health checks.
+	// Recreate: stop & remove ALL old containers immediately (databases, volumes, no health path).
+	oldContainers, err := d.docker.FindAllContainersByLabel(ctx, "clank.service_slug", opts.ServiceSlug)
 	if err != nil {
-		log.Printf("Warning: could not search for old container: %v", err)
+		log.Printf("Warning: could not search for old containers: %v", err)
 	}
 
-	useBlueGreen := shouldBlueGreen(opts) && oldID != ""
+	useBlueGreen := shouldBlueGreen(opts) && len(oldContainers) > 0
 
-	if oldID != "" && !useBlueGreen {
-		// Recreate strategy: stop old before starting new
-		log.Printf("Stopping old container %s (%s) [recreate]", oldName, oldID[:12])
-		if err := d.docker.StopAndRemove(ctx, oldID); err != nil {
-			log.Printf("Warning: failed to remove old container: %v", err)
+	if len(oldContainers) > 0 && !useBlueGreen {
+		// Recreate strategy: stop and remove ALL existing containers before starting new
+		removed := 0
+		for _, old := range oldContainers {
+			log.Printf("Stopping old container %s (%s) [recreate]", old.Name, shortID(old.ID, 12))
+			if err := d.docker.StopAndRemove(ctx, old.ID); err != nil {
+				log.Printf("Warning: failed to remove old container %s: %v", old.Name, err)
+			} else {
+				removed++
+			}
 		}
-		oldID = "" // Already cleaned up
+		log.Printf("Cleaned up %d stale container(s) for service %s before recreate", removed, opts.ServiceSlug)
+		oldContainers = nil // Already cleaned up
 	}
 	if useBlueGreen {
-		log.Printf("Blue-green deploy: old container %s (%s) stays up until new passes health checks", oldName, oldID[:12])
+		log.Printf("Blue-green deploy: %d existing container(s) stay up until new passes health checks", len(oldContainers))
 		onProgress("deploying", "Starting new container (current version remains active)", "", "")
 	}
 
@@ -539,10 +601,16 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 
 	// === Phase A: Crash detection ===
 	// Wait 2s then check if the container immediately exited.
-	select {
-	case <-ctx.Done():
-		return result, ctx.Err()
-	case <-time.After(2 * time.Second):
+	crashDelay := d.crashCheckDelay
+	if crashDelay == 0 {
+		crashDelay = 2 * time.Second
+	}
+	if crashDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return result, ctx.Err()
+		case <-time.After(crashDelay):
+		}
 	}
 
 	ci, err := d.docker.InspectContainer(ctx, containerID)
@@ -671,34 +739,37 @@ func (d *Deployer) Deploy(ctx context.Context, opts DeployOpts, onProgress Progr
 	if hc.Path != "" {
 		result, passedAttempt, err := d.runHTTPHealthChecks(ctx, result, containerID, containerName, ip, effectivePort, hc, opts.OnLog)
 		if err != nil {
-			// Health check failed. In blue-green mode, old container is still
+			// Health check failed. In blue-green mode, old containers are still
 			// serving traffic — runHTTPHealthChecks already stopped the new one.
 			if useBlueGreen {
-				log.Printf("Blue-green deploy failed: old container %s continues serving", oldName)
+				log.Printf("Blue-green deploy failed: existing container(s) for %s continue serving", opts.ServiceSlug)
 			}
 			return result, err
 		}
 		// Wait for Traefik to pick up the new container's Docker labels and
-		// settle routing before removing the old container or reporting active.
+		// settle routing before removing old containers or reporting active.
 		d.waitForTraefikReady(ctx, opts, hc.Path, opts.OnLog)
 
-		// Health check passed — clean up old container if blue-green
-		if useBlueGreen && oldID != "" && oldID != containerID {
-			// Brief delay for Traefik to fully route to new container
-			select {
-			case <-ctx.Done():
-				return result, ctx.Err()
-			case <-time.After(2 * time.Second):
+		// Health check passed — sweep ALL stale containers for this service slug
+		// (keeping only the newly deployed containerID).
+		if useBlueGreen {
+			cutoverDelay := d.cutoverDelay
+			if cutoverDelay == 0 {
+				cutoverDelay = 2 * time.Second
 			}
-			log.Printf("Blue-green success: stopping old container %s (%s)", oldName, oldID[:12])
-			if stopErr := d.docker.StopAndRemove(ctx, oldID); stopErr != nil {
-				log.Printf("Warning: failed to remove old container: %v", stopErr)
+			if cutoverDelay > 0 {
+				// Brief delay for Traefik to fully route to new container
+				select {
+				case <-ctx.Done():
+					return result, ctx.Err()
+				case <-time.After(cutoverDelay):
+				}
 			}
-			onProgress("deploying", "Traffic switched to new version", "", "")
-		} else if useBlueGreen && oldID == containerID {
-			log.Printf("Blue-green: adopted existing container %s — skipping cleanup", oldName)
+			if cleaned := d.sweepStaleContainers(ctx, opts.ServiceSlug, containerID); cleaned > 0 {
+				onProgress("deploying", "Traffic switched to new version", "", "")
+			}
 		}
-		onProgress("active", fmt.Sprintf("Health check passed (attempt %d)", passedAttempt), containerID[:12], containerName)
+		onProgress("active", fmt.Sprintf("Health check passed (attempt %d)", passedAttempt), shortID(containerID, 12), containerName)
 		return result, nil
 	}
 

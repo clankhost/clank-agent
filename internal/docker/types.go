@@ -31,6 +31,21 @@ type NetworkInfo struct {
 	Name string
 }
 
+// ContainerRef identifies a Docker container by ID, name, and state.
+type ContainerRef struct {
+	ID    string
+	Name  string
+	State string
+}
+
+// ExecResult holds the result of running a command inside a container.
+type ExecResult struct {
+	ExitCode  int
+	Stdout    string
+	Stderr    string
+	Truncated bool
+}
+
 // ContainerInfo describes a running managed container (for heartbeat reporting).
 type ContainerInfo struct {
 	ContainerID string
