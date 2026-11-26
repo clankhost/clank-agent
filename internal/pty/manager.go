@@ -97,6 +97,7 @@ type Manager struct {
 	mu            sync.Mutex
 	sessions      map[string]*activeSession
 	pending       map[string]struct{}
+	cancelled     map[string]struct{}
 	maxSessions   int
 	idleTimeout   time.Duration
 	maxInputBytes int
@@ -109,6 +110,7 @@ func NewManager(dockerClient DockerPTYClient, send func(*clankv1.PtyOutput)) *Ma
 		send:          send,
 		sessions:      make(map[string]*activeSession),
 		pending:       make(map[string]struct{}),
+		cancelled:     make(map[string]struct{}),
 		maxSessions:   DefaultMaxSessions,
 		idleTimeout:   DefaultIdleTimeout,
 		maxInputBytes: DefaultMaxInputBytes,
@@ -208,9 +210,18 @@ func (m *Manager) handleOpen(ctx context.Context, cmd *clankv1.PtyCommand) {
 
 	m.mu.Lock()
 	delete(m.pending, sessionID)
+	_, wasCancelled := m.cancelled[sessionID]
+	delete(m.cancelled, sessionID)
 	if err != nil {
 		m.mu.Unlock()
-		m.emitError(sessionID, err.Error(), true)
+		if !wasCancelled {
+			m.emitError(sessionID, err.Error(), true)
+		}
+		return
+	}
+	if wasCancelled {
+		m.mu.Unlock()
+		_ = ptySess.Close()
 		return
 	}
 	if ctx.Err() != nil {
@@ -304,6 +315,8 @@ func (m *Manager) closeSession(sessionID string, timedOut bool) {
 	sess, ok := m.sessions[sessionID]
 	if ok {
 		delete(m.sessions, sessionID)
+	} else if _, opening := m.pending[sessionID]; opening {
+		m.cancelled[sessionID] = struct{}{}
 	}
 	m.mu.Unlock()
 	if ok {
@@ -316,6 +329,9 @@ func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	sessions := m.sessions
 	m.sessions = make(map[string]*activeSession)
+	for id := range m.pending {
+		m.cancelled[id] = struct{}{}
+	}
 	m.mu.Unlock()
 
 	for _, sess := range sessions {

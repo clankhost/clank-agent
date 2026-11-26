@@ -266,10 +266,10 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	// failed heartbeat still ends it; command handlers get a routed stream
 	// whose sends follow the live connection across reconnects.
 	stream := a.streams.attach(raw)
-	defer func() {
-		a.streams.detach(stream)
-		a.handler.CloseAllPTY()
-	}()
+	// Do NOT close PTY sessions on stream recycle (e.g. Cloudflare ~2m RST_STREAM);
+	// streamRouter transparently re-attaches them to the next live stream, and
+	// Run() closes all PTY sessions on actual agent shutdown.
+	defer a.streams.detach(stream)
 
 	if !quiet {
 		log.Println("Connected to control plane")
