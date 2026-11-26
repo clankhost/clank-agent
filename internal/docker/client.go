@@ -824,6 +824,85 @@ func (m *Manager) ExecInContainer(ctx context.Context, containerNameOrID string,
 	}, nil
 }
 
+// ExecAttachPTY attaches an interactive PTY exec session inside a running
+// Clank-managed container. Callers must Close() the returned PTYSession.
+func (m *Manager) ExecAttachPTY(ctx context.Context, containerName string, command []string, cols, rows int) (*PTYSession, error) {
+	if containerName == "" {
+		return nil, fmt.Errorf("container name is required")
+	}
+
+	inspect, err := m.cli.ContainerInspect(ctx, containerName)
+	if err != nil {
+		return nil, fmt.Errorf("inspecting container %s: %w", containerName, err)
+	}
+	if inspect.Config == nil || inspect.Config.Labels["clank.managed"] != "true" {
+		return nil, fmt.Errorf("refusing to attach PTY to unmanaged container %s: missing clank.managed=true label", containerName)
+	}
+	if inspect.State == nil || !inspect.State.Running {
+		return nil, fmt.Errorf("container %s is not running", containerName)
+	}
+
+	if len(command) == 0 {
+		command = []string{"/bin/sh"}
+	}
+
+	execResp, err := m.cli.ContainerExecCreate(ctx, inspect.ID, container.ExecOptions{
+		Tty:          true,
+		AttachStdin:  true,
+		AttachStdout: true,
+		AttachStderr: true,
+		Cmd:          command,
+		Env:          []string{"TERM=xterm-256color"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating PTY exec: %w", err)
+	}
+
+	hijack, err := m.cli.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{
+		Tty: true,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("attaching PTY exec: %w", err)
+	}
+
+	if cols > 0 && rows > 0 {
+		// Non-fatal if initial resize fails (e.g. process already exited).
+		_ = m.cli.ContainerExecResize(ctx, execResp.ID, container.ResizeOptions{
+			Height: uint(rows),
+			Width:  uint(cols),
+		})
+	}
+
+	return &PTYSession{
+		ExecID: execResp.ID,
+		Conn:   hijack.Conn,
+		Reader: hijack.Reader,
+	}, nil
+}
+
+// ExecResizePTY resizes the TTY of an active container exec session.
+func (m *Manager) ExecResizePTY(ctx context.Context, execID string, cols, rows int) error {
+	if execID == "" {
+		return fmt.Errorf("exec ID is required")
+	}
+	return m.cli.ContainerExecResize(ctx, execID, container.ResizeOptions{
+		Height: uint(rows),
+		Width:  uint(cols),
+	})
+}
+
+// ExecInspectExitCode returns the exit code of a container exec instance.
+func (m *Manager) ExecInspectExitCode(ctx context.Context, execID string) (int, error) {
+	if execID == "" {
+		return -1, fmt.Errorf("exec ID is required")
+	}
+	inspect, err := m.cli.ContainerExecInspect(ctx, execID)
+	if err != nil {
+		return -1, fmt.Errorf("inspecting exec %s: %w", execID, err)
+	}
+	return inspect.ExitCode, nil
+}
+
 // WaitContainer blocks until a container stops and returns its exit code.
 func (m *Manager) WaitContainer(ctx context.Context, containerID string) (int64, error) {
 	statusCh, errCh := m.cli.ContainerWait(ctx, containerID, container.WaitConditionNotRunning)

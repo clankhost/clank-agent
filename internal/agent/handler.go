@@ -19,6 +19,7 @@ import (
 	"github.com/clankhost/clank-agent/internal/endpoint"
 	"github.com/clankhost/clank-agent/internal/grpcclient"
 	"github.com/clankhost/clank-agent/internal/logs"
+	"github.com/clankhost/clank-agent/internal/pty"
 	"github.com/clankhost/clank-agent/internal/selfupdate"
 	"github.com/clankhost/clank-agent/internal/sysinfo"
 )
@@ -74,6 +75,9 @@ type CommandHandler struct {
 	// cannot race and corrupt binary replacement.
 	updateMu       sync.Mutex
 	updateInFlight bool
+
+	// ptyMgr manages interactive container PTY sessions.
+	ptyMgr *pty.Manager
 }
 
 // NewCommandHandler creates a handler with all agent capabilities.
@@ -103,6 +107,31 @@ func NewCommandHandler(dm *docker.Manager, b *build.Builder, d *deploy.Deployer,
 		currentVersion: version,
 		logCollector:   lc,
 		buildSem:       make(chan struct{}, maxBuilds),
+		ptyMgr:         pty.NewManager(dm, nil),
+	}
+}
+
+// SetPTYSender configures the callback used to emit PtyOutput messages.
+func (h *CommandHandler) SetPTYSender(send func(*clankv1.PtyOutput)) {
+	if h.ptyMgr == nil {
+		h.ptyMgr = pty.NewManager(h.docker, send)
+		return
+	}
+	h.ptyMgr.SetSender(send)
+}
+
+// HandlePtyCommand processes an interactive PTY command (open/input/resize/close).
+func (h *CommandHandler) HandlePtyCommand(ctx context.Context, cmd *clankv1.PtyCommand) {
+	if h.ptyMgr == nil {
+		return
+	}
+	h.ptyMgr.Handle(ctx, cmd)
+}
+
+// CloseAllPTY closes all active interactive PTY sessions.
+func (h *CommandHandler) CloseAllPTY() {
+	if h.ptyMgr != nil {
+		h.ptyMgr.CloseAll()
 	}
 }
 

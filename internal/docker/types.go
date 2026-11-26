@@ -1,6 +1,26 @@
 package docker
 
-import "github.com/docker/docker/api/types/container"
+import (
+	"bufio"
+	"net"
+
+	"github.com/docker/docker/api/types/container"
+)
+
+// PTYSession represents an attached interactive PTY exec session in a container.
+type PTYSession struct {
+	ExecID string
+	Conn   net.Conn
+	Reader *bufio.Reader
+}
+
+// Close closes the underlying hijacked connection for the PTY session.
+func (s *PTYSession) Close() error {
+	if s == nil || s.Conn == nil {
+		return nil
+	}
+	return s.Conn.Close()
+}
 
 // VolumeMount describes a named Docker volume to mount into a container.
 type VolumeMount struct {

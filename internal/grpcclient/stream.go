@@ -55,6 +55,9 @@ type MaintenanceHandler func(ctx context.Context, stream ConnectStream, cmd *cla
 // the stream should reconnect using the new identity.
 type CredentialRotationHandler func(ctx context.Context, stream ConnectStream, rotation *clankv1.CredentialRotation) bool
 
+// PtyCommandHandler handles interactive PTY commands from the control plane.
+type PtyCommandHandler func(ctx context.Context, stream ConnectStream, cmd *clankv1.PtyCommand)
+
 var ErrCredentialRotated = errors.New("credential rotation activated")
 
 // CommandHandlers groups all command handler functions.
@@ -68,6 +71,7 @@ type CommandHandlers struct {
 	OnPushImage          PushImageHandler
 	OnMaintenance        MaintenanceHandler
 	OnCredentialRotation CredentialRotationHandler
+	OnPtyCommand         PtyCommandHandler
 }
 
 // OpenConnectStream opens the AgentControlService.Connect bidi stream.
@@ -107,7 +111,7 @@ func SendHeartbeat(stream ConnectStream, info *sysinfo.Info, containers []sysinf
 					TailscaleIp:           info.TailscaleIP,
 					TailscaleHostname:     info.TailscaleHostname,
 					TailscaleCliAvailable: info.TailscaleCLIAvailable,
-					Capabilities:          []string{"credential_rotation_v1"},
+					Capabilities:          []string{"credential_rotation_v1", "pty"},
 				},
 				Containers: protoContainers,
 			},
@@ -239,6 +243,32 @@ func ReceiveCommands(ctx context.Context, stream ConnectStream, handlers Command
 		case *clankv1.ControlMessage_CredentialRotationV2:
 			if handlers.OnCredentialRotation != nil && handlers.OnCredentialRotation(ctx, stream, p.CredentialRotationV2) {
 				return ErrCredentialRotated
+			}
+
+		case *clankv1.ControlMessage_PtyCmd:
+			if handlers.OnPtyCommand != nil {
+				cmd := p.PtyCmd
+				// Keep INPUT and CLOSE ordered inline so rapid keystrokes do not reorder;
+				// run OPEN and RESIZE asynchronously because they perform Docker API calls.
+				if cmd.GetAction() == clankv1.PtyCommand_INPUT || cmd.GetAction() == clankv1.PtyCommand_CLOSE {
+					func() {
+						defer func() {
+							if r := recover(); r != nil {
+								log.Printf("PANIC in PTY command handler: %v", r)
+							}
+						}()
+						handlers.OnPtyCommand(ctx, stream, cmd)
+					}()
+				} else {
+					go func() {
+						defer func() {
+							if r := recover(); r != nil {
+								log.Printf("PANIC in PTY command handler: %v", r)
+							}
+						}()
+						handlers.OnPtyCommand(ctx, stream, cmd)
+					}()
+				}
 			}
 
 		default:

@@ -72,7 +72,7 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 	cfgMu := &sync.RWMutex{}
 	h := NewCommandHandler(dockerMgr, b, d, cfg, cfgMu, cfgDir, agentVersion, lc)
 
-	return &Agent{
+	a := &Agent{
 		cfg:          cfg,
 		cfgMu:        cfgMu,
 		cfgDir:       cfgDir,
@@ -84,7 +84,15 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 		handler:      h,
 		logCollector: lc,
 		metCollector: mc,
-	}, nil
+	}
+	h.SetPTYSender(func(out *clankv1.PtyOutput) {
+		if err := a.streams.send(&clankv1.AgentMessage{
+			Payload: &clankv1.AgentMessage_PtyOutput{PtyOutput: out},
+		}); err != nil {
+			log.Printf("[pty] Failed to send PTY output for session %s: %v", out.GetSessionId(), err)
+		}
+	})
+	return a, nil
 }
 
 // Run connects to the control plane and runs the heartbeat loop.
@@ -92,6 +100,7 @@ func New(cfg *Config, agentVersion string, cfgDir string) (*Agent, error) {
 // Returns when ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	a.rootCtx = ctx
+	defer a.handler.CloseAllPTY()
 
 	// Post-update self-check: verify the new binary can connect.
 	// If this fails repeatedly, roll back to the previous binary.
@@ -257,7 +266,10 @@ func (a *Agent) connectAndStream(ctx context.Context, quiet bool) error {
 	// failed heartbeat still ends it; command handlers get a routed stream
 	// whose sends follow the live connection across reconnects.
 	stream := a.streams.attach(raw)
-	defer a.streams.detach(stream)
+	defer func() {
+		a.streams.detach(stream)
+		a.handler.CloseAllPTY()
+	}()
 
 	if !quiet {
 		log.Println("Connected to control plane")
@@ -330,6 +342,9 @@ func (a *Agent) commandHandlers() grpcclient.CommandHandlers {
 		},
 		OnMaintenance:        a.handler.HandleMaintenance,
 		OnCredentialRotation: a.handleCredentialRotation,
+		OnPtyCommand: func(ctx context.Context, _ grpcclient.ConnectStream, cmd *clankv1.PtyCommand) {
+			a.handler.HandlePtyCommand(ctx, cmd)
+		},
 	}
 }
 
